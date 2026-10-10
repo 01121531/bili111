@@ -45,7 +45,7 @@ export class UpdateService {
   }
 
   private currentCommit() {
-    try { return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' }).trim(); }
+    try { return execFileSync('git', ['-c', `safe.directory=${process.cwd()}`, 'rev-parse', 'HEAD'], { cwd: process.cwd(), encoding: 'utf8' }).trim(); }
     catch { return null; }
   }
 
