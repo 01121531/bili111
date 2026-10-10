@@ -62,7 +62,6 @@ export class UpdateService {
     const current = this.currentCommit();
     const remote = await this.remoteCommit();
     const state = this.writeState({ status: 'idle', currentCommit: current || undefined, remoteCommit: remote.sha, remoteMessage: remote.message, remoteDate: remote.date || undefined, checkedAt: new Date().toISOString(), error: undefined, rollback: false });
-    this.db.setSetting('update_last_check', state.checkedAt!);
     return this.status();
   }
 
@@ -78,7 +77,7 @@ export class UpdateService {
       remoteDate: state.remoteDate || null,
       version: this.version(),
       hasUpdate: Boolean(current && state.remoteCommit && current !== state.remoteCommit),
-      lastCheckAt: state.checkedAt || this.db.getSetting('update_last_check') || null,
+      lastCheckAt: state.checkedAt || null,
       status: state.status || 'idle',
       jobId: state.jobId || null,
       startedAt: state.startedAt || null,
@@ -115,6 +114,7 @@ export class UpdateService {
     this.writeState({ status: 'running', jobId, currentCommit: current, startedAt: new Date().toISOString(), finishedAt: undefined, error: undefined, rollback: false });
     const child = spawn('sudo', ['-n', UPDATE_SCRIPT], { cwd: process.cwd(), detached: true, stdio: 'ignore', env: { ...process.env, LOTTERY_UPDATE_JOB_ID: jobId } });
     child.on('error', error => { this.writeState({ status: 'failed', finishedAt: new Date().toISOString(), error: String(error) }); this.running = false; });
+    child.on('exit', () => { this.running = false; });
     child.unref();
     return { jobId };
   }
