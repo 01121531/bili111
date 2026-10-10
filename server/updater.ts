@@ -12,6 +12,7 @@ type UpdateState = {
   status?: 'idle' | 'checking' | 'running' | 'success' | 'failed';
   jobId?: string;
   currentCommit?: string;
+  deployedCommit?: string;
   remoteCommit?: string;
   remoteMessage?: string;
   remoteDate?: string;
@@ -59,7 +60,8 @@ export class UpdateService {
   }
 
   async check() {
-    const current = this.currentCommit();
+    const stateBefore = this.readState();
+    const current = stateBefore.deployedCommit || this.currentCommit();
     const remote = await this.remoteCommit();
     const state = this.writeState({ status: 'idle', currentCommit: current || undefined, remoteCommit: remote.sha, remoteMessage: remote.message, remoteDate: remote.date || undefined, checkedAt: new Date().toISOString(), error: undefined, rollback: false });
     return this.status();
@@ -67,7 +69,7 @@ export class UpdateService {
 
   status() {
     const state = this.readState();
-    const current = this.currentCommit();
+    const current = state.deployedCommit || this.currentCommit();
     return {
       repository: REPOSITORY,
       branch: BRANCH,
@@ -106,7 +108,7 @@ export class UpdateService {
     const state = this.readState();
     if (this.running || state.status === 'running') throw new Error('已有更新任务正在运行');
     if (!existsSync(UPDATE_SCRIPT)) throw new Error('服务器未安装固定更新脚本');
-    const current = this.currentCommit();
+    const current = state.deployedCommit || this.currentCommit();
     if (!current || !state.remoteCommit) throw new Error('请先检查更新');
     if (current === state.remoteCommit) throw new Error('当前已经是最新版本');
     const jobId = randomBytes(10).toString('hex');

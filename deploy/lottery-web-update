@@ -11,6 +11,7 @@ LOG_FILE="$DATA_DIR/update.log"
 BACKUP_DIR="$DATA_DIR/update-backups/$(date -u +%Y%m%dT%H%M%SZ)"
 OLD_COMMIT=""
 NEW_COMMIT=""
+FALLBACK_MODE="false"
 
 mkdir -p "$DATA_DIR" "$BACKUP_DIR"
 touch "$LOG_FILE"
@@ -19,13 +20,14 @@ exec >>"$LOG_FILE" 2>&1
 log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
 write_state() {
-  local status="$1" error="${2:-}" rollback="${3:-false}"
-  UPDATE_STATE_FILE="$STATE_FILE" UPDATE_STATUS="$status" UPDATE_ERROR="$error" UPDATE_COMMIT="${NEW_COMMIT:-$OLD_COMMIT}" UPDATE_ROLLBACK="$rollback" node - <<'NODE'
+  local status="$1" error="${2:-}" rollback="${3:-false}" deployed="${4:-}"
+  UPDATE_STATE_FILE="$STATE_FILE" UPDATE_STATUS="$status" UPDATE_ERROR="$error" UPDATE_COMMIT="${NEW_COMMIT:-$OLD_COMMIT}" UPDATE_DEPLOYED="$deployed" UPDATE_ROLLBACK="$rollback" node - <<'NODE'
 const fs = require('fs');
 const file = process.env.UPDATE_STATE_FILE;
 let current = {};
 try { current = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
 const next = { ...current, status: process.env.UPDATE_STATUS, error: process.env.UPDATE_ERROR || undefined, currentCommit: process.env.UPDATE_COMMIT || undefined, rollback: process.env.UPDATE_ROLLBACK === 'true', finishedAt: new Date().toISOString() };
+if (process.env.UPDATE_DEPLOYED) next.deployedCommit = process.env.UPDATE_DEPLOYED;
 if (next.status === 'running') next.startedAt = new Date().toISOString();
 fs.writeFileSync(file, JSON.stringify(next, null, 2));
 NODE
@@ -50,7 +52,7 @@ rollback() {
   npm run web:typecheck || true
   npm run web:build || true
   systemctl restart "$SERVICE_NAME" || true
-  write_state failed "$reason" true
+  write_state failed "$reason" true "$OLD_COMMIT"
   log "已回滚到 $OLD_COMMIT"
   exit 1
 }
@@ -65,10 +67,26 @@ write_state running "" false
 cp -f "$DATA_DIR/lottery.db" "$BACKUP_DIR/lottery.db" 2>/dev/null || true
 cp -f "$DATA_DIR/.encryption-key" "$BACKUP_DIR/.encryption-key" 2>/dev/null || true
 
-git -C "$APP_DIR" fetch origin "$BRANCH" || rollback "git fetch 失败"
-NEW_COMMIT="$(git -C "$APP_DIR" rev-parse "origin/$BRANCH")"
-if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "已经是最新版本" false; log "已经是最新版本"; exit 0; fi
-git -C "$APP_DIR" reset --hard "$NEW_COMMIT" || rollback "切换到新版本失败"
+if git -C "$APP_DIR" fetch origin "$BRANCH"; then
+  NEW_COMMIT="$(git -C "$APP_DIR" rev-parse "origin/$BRANCH")"
+  if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "已经是最新版本" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
+  git -C "$APP_DIR" reset --hard "$NEW_COMMIT" || rollback "切换到新版本失败"
+else
+  log "git fetch 不可用，使用固定仓库 codeload 快照"
+  TMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "$TMP_DIR"' EXIT
+  NEW_COMMIT="$(curl -fsSL --max-time 60 "https://api.github.com/repos/$REPO/commits/$BRANCH" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).sha));')" || rollback "获取 GitHub commit 失败"
+  if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "已经是最新版本" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
+  curl -fsSL --max-time 180 "https://codeload.github.com/$REPO/tar.gz/$NEW_COMMIT" -o "$TMP_DIR/source.tar.gz" || rollback "下载 GitHub 源码失败"
+  tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR" || rollback "解压 GitHub 源码失败"
+  SOURCE_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
+  [ -n "$SOURCE_DIR" ] || rollback "GitHub 源码目录为空"
+  git -C "$APP_DIR" ls-files -z | xargs -0 -r rm -f
+  cp -a "$SOURCE_DIR"/. "$APP_DIR/"
+  git -C "$APP_DIR" add -A
+  git -C "$APP_DIR" commit -m "deploy: GitHub $BRANCH $NEW_COMMIT" || rollback "写入源码快照失败"
+  FALLBACK_MODE="true"
+fi
 
 cd "$APP_DIR" || rollback "无法进入项目目录"
 npm ci --no-audit --no-fund || rollback "安装依赖失败"
@@ -80,5 +98,5 @@ curl -fsS --max-time 15 http://127.0.0.1:6666/ >/dev/null || rollback "6666 健�
 curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || rollback "8080 代理检查失败"
 test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' http://127.0.0.1:6666/api/auth/me)" = "401" || rollback "未登录鉴权检查失败"
 
-write_state success "" false
+write_state success "" false "$NEW_COMMIT"
 log "更新成功: $NEW_COMMIT"
