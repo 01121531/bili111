@@ -19,6 +19,17 @@ exec >>"$LOG_FILE" 2>&1
 
 log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
+wait_for_url() {
+  local url="$1"
+  local attempts=30
+  while [ "$attempts" -gt 0 ]; do
+    if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then return 0; fi
+    attempts=$((attempts - 1))
+    sleep 1
+  done
+  return 1
+}
+
 write_state() {
   local status="$1" error="${2:-}" rollback="${3:-false}" deployed="${4:-}"
   UPDATE_STATE_FILE="$STATE_FILE" UPDATE_STATUS="$status" UPDATE_ERROR="$error" UPDATE_COMMIT="${NEW_COMMIT:-$OLD_COMMIT}" UPDATE_DEPLOYED="$deployed" UPDATE_ROLLBACK="$rollback" node - <<'NODE'
@@ -94,8 +105,8 @@ npm run web:typecheck || rollback "TypeScript 检查失败"
 npm run web:build || rollback "前端构建失败"
 systemctl restart "$SERVICE_NAME" || rollback "重启服务失败"
 systemctl is-active --quiet "$SERVICE_NAME" || rollback "systemd 服务未运行"
-curl -fsS --max-time 15 http://127.0.0.1:6666/ >/dev/null || rollback "6666 健康检查失败"
-curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || rollback "8080 代理检查失败"
+wait_for_url http://127.0.0.1:6666/ || rollback "6666 健康检查失败"
+wait_for_url http://127.0.0.1:8080/ || rollback "8080 代理检查失败"
 test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' http://127.0.0.1:6666/api/auth/me)" = "401" || rollback "未登录鉴权检查失败"
 
 write_state success "" false "$NEW_COMMIT"
