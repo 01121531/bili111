@@ -40,6 +40,30 @@
 - 检查更新
 - 更多功能设置请参考配置文件
 
+## Web 控制台
+
+本仓库在保留原 CLI 的基础上提供了单管理员 Web 控制台，可管理多个 B 站账号、串行执行任务、查看实时日志、抽奖记录和中奖提醒。Cookie 使用 AES-256-GCM 加密保存，数据库位于 `data/lottery.db`。
+
+### 本地运行
+
+```bash
+npm install
+npm run web:build
+PORT=6666 ADMIN_PASSWORD=请设置管理员密码 npm run web:start
+```
+
+浏览器访问 `http://localhost:6666`。原有 CLI 命令（`start`、`check`、`clear`、`account` 等）仍然可用。
+
+### 服务器部署
+
+推荐使用 systemd 运行 `lottery-web.service`，Node 服务监听 `6666`，Nginx 对外代理到 `8080`。生产环境至少设置 `ADMIN_PASSWORD`，并确保 `data/.encryption-key` 只允许服务用户读取。
+
+### 在线更新
+
+登录控制台后打开“系统更新”，手动检查 `01121531/bili111` 的 `main` 分支，再确认执行更新。更新脚本会备份 `data/lottery.db` 和 `data/.encryption-key`，安装依赖、类型检查、构建前端并重启服务；失败时自动恢复旧 commit 和数据备份。更新源、仓库、分支和命令均由服务器固定配置，网页端不能修改。
+
+不要将 `node_modules`、`data/lottery.db`、`data/.encryption-key`、Cookie、管理员密码或 GitHub Token 提交到 Git。服务器安装固定脚本可参考 [`deploy/lottery-web-update`](deploy/lottery-web-update)。
+
 **声明**: 此脚本仅用于学习和测试，作者本人并不对其负责，请于运行测试完成后自行删除，请勿滥用！
 
 ---------------------------------

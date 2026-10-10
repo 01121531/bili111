@@ -1,4 +1,7 @@
 node_modules/
+data/
+web/dist/
+my_config.js
 .vscode/
 tests/
 dyids/
@@ -8,6 +11,8 @@ dist/
 .env
 *.log
 *.zip
-package-lock.json
 env.js
 my_config.js
+data/update-backups/
+data/update.log
+data/update-state.json

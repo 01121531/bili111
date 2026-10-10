@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -u
+
+APP_DIR="/opt/bili-dynamic-lottery"
+REPO="01121531/bili111"
+BRANCH="main"
+SERVICE_NAME="lottery-web.service"
+DATA_DIR="$APP_DIR/data"
+STATE_FILE="$DATA_DIR/update-state.json"
+LOG_FILE="$DATA_DIR/update.log"
+BACKUP_DIR="$DATA_DIR/update-backups/$(date -u +%Y%m%dT%H%M%SZ)"
+OLD_COMMIT=""
+NEW_COMMIT=""
+
+mkdir -p "$DATA_DIR" "$BACKUP_DIR"
+touch "$LOG_FILE"
+exec >>"$LOG_FILE" 2>&1
+
+log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+write_state() {
+  local status="$1" error="${2:-}" rollback="${3:-false}"
+  UPDATE_STATE_FILE="$STATE_FILE" UPDATE_STATUS="$status" UPDATE_ERROR="$error" UPDATE_COMMIT="${NEW_COMMIT:-$OLD_COMMIT}" UPDATE_ROLLBACK="$rollback" node - <<'NODE'
+const fs = require('fs');
+const file = process.env.UPDATE_STATE_FILE;
+let current = {};
+try { current = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+const next = { ...current, status: process.env.UPDATE_STATUS, error: process.env.UPDATE_ERROR || undefined, currentCommit: process.env.UPDATE_COMMIT || undefined, rollback: process.env.UPDATE_ROLLBACK === 'true', finishedAt: new Date().toISOString() };
+if (next.status === 'running') next.startedAt = new Date().toISOString();
+fs.writeFileSync(file, JSON.stringify(next, null, 2));
+NODE
+}
+
+restore_data() {
+  for name in lottery.db .encryption-key; do
+    if [ -f "$BACKUP_DIR/$name" ]; then cp -f "$BACKUP_DIR/$name" "$DATA_DIR/$name"; fi
+  done
+}
+
+rollback() {
+  local reason="$1"
+  log "更新失败: $reason"
+  if [ -n "$OLD_COMMIT" ]; then
+    git -C "$APP_DIR" reset --hard "$OLD_COMMIT" || true
+  fi
+  restore_data
+  cd "$APP_DIR" || true
+  npm ci --no-audit --no-fund || true
+  npm run web:typecheck || true
+  npm run web:build || true
+  systemctl restart "$SERVICE_NAME" || true
+  write_state failed "$reason" true
+  log "已回滚到 $OLD_COMMIT"
+  exit 1
+}
+
+log "开始更新 $REPO@$BRANCH"
+if [ ! -d "$APP_DIR/.git" ]; then rollback "项目目录不是 Git 仓库"; fi
+if [ "$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || true)" != "https://github.com/$REPO.git" ]; then rollback "origin 不是固定目标仓库"; fi
+if [ -n "$(git -C "$APP_DIR" status --porcelain)" ]; then rollback "工作区存在未提交修改"; fi
+
+OLD_COMMIT="$(git -C "$APP_DIR" rev-parse HEAD)"
+write_state running "" false
+cp -f "$DATA_DIR/lottery.db" "$BACKUP_DIR/lottery.db" 2>/dev/null || true
+cp -f "$DATA_DIR/.encryption-key" "$BACKUP_DIR/.encryption-key" 2>/dev/null || true
+
+git -C "$APP_DIR" fetch origin "$BRANCH" || rollback "git fetch 失败"
+NEW_COMMIT="$(git -C "$APP_DIR" rev-parse "origin/$BRANCH")"
+if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "已经是最新版本" false; log "已经是最新版本"; exit 0; fi
+git -C "$APP_DIR" reset --hard "$NEW_COMMIT" || rollback "切换到新版本失败"
+
+cd "$APP_DIR" || rollback "无法进入项目目录"
+npm ci --no-audit --no-fund || rollback "安装依赖失败"
+npm run web:typecheck || rollback "TypeScript 检查失败"
+npm run web:build || rollback "前端构建失败"
+systemctl restart "$SERVICE_NAME" || rollback "重启服务失败"
+systemctl is-active --quiet "$SERVICE_NAME" || rollback "systemd 服务未运行"
+curl -fsS --max-time 15 http://127.0.0.1:6666/ >/dev/null || rollback "6666 健康检查失败"
+curl -fsS --max-time 15 http://127.0.0.1:8080/ >/dev/null || rollback "8080 代理检查失败"
+test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' http://127.0.0.1:6666/api/auth/me)" = "401" || rollback "未登录鉴权检查失败"
+
+write_state success "" false
+log "更新成功: $NEW_COMMIT"
