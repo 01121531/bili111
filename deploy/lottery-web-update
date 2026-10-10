@@ -29,6 +29,7 @@ const next = { ...current, status: process.env.UPDATE_STATUS, error: process.env
 if (next.status === 'running') next.startedAt = new Date().toISOString();
 fs.writeFileSync(file, JSON.stringify(next, null, 2));
 NODE
+  chown lottery-web:lottery-web "$STATE_FILE" "$LOG_FILE" 2>/dev/null || true
 }
 
 restore_data() {

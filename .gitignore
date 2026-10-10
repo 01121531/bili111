@@ -1,4 +1,5 @@
 node_modules/
+.npm/
 data/
 web/dist/
 my_config.js
