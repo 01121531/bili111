@@ -11,11 +11,13 @@ import { createQrSession, pollQrSession, verifyBiliCookie } from './bili';
 import { SerialScheduler } from './scheduler';
 import { mergedConfig } from './config';
 import { UpdateService } from './updater';
+import { AiService } from './ai';
 
 async function bootstrap() {
 const app = Fastify({ logger: false });
 const db = await AppDatabase.create();
-const scheduler = new SerialScheduler(db);
+const ai = new AiService(db);
+const scheduler = new SerialScheduler(db, ai);
 const updater = new UpdateService(db);
 const sessions = new Set<string>();
 const qrSessions = new Map<string, { key: string; expires: number }>();
@@ -87,6 +89,25 @@ app.post('/api/config/import', { preHandler: auth }, async (request, reply) => {
 app.get('/api/accounts/:id/config', { preHandler: auth }, async (request) => mergedConfig(db.getConfig(parseId((request.params as any).id))));
 app.put('/api/accounts/:id/config', { preHandler: auth }, async (request) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return { error: '账号不存在' }; db.setConfig(id, request.body as Record<string, unknown>); return mergedConfig(request.body as Record<string, unknown>); });
 app.get('/api/config/export', { preHandler: auth }, async () => ({ accounts: db.listAccounts().map(publicAccount), exportedAt: new Date().toISOString() }));
+app.get('/api/ai/providers', { preHandler: auth }, async () => ai.listProviders());
+app.get('/api/ai/config', { preHandler: auth }, async () => ai.getGlobalPublic());
+app.put('/api/ai/config', { preHandler: auth }, async (request, reply) => {
+  try { return ai.saveGlobal((request.body || {}) as Record<string, unknown>); } catch (error) { return reply.code(400).send({ error: String(error) }); }
+});
+app.post('/api/ai/test', { preHandler: auth }, async (request, reply) => {
+  try { return await ai.test((request.body || {}) as Record<string, unknown>); } catch (error) { return reply.code(502).send({ error: String(error) }); }
+});
+app.get('/api/accounts/:id/ai-config', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return ai.getResolvedPublic(id);
+});
+app.put('/api/accounts/:id/ai-config', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  try { return ai.saveAccount(id, (request.body || {}) as Record<string, unknown>); } catch (error) { return reply.code(400).send({ error: String(error) }); }
+});
+app.post('/api/accounts/:id/ai-test', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  try { return await ai.test((request.body || {}) as Record<string, unknown>, id); } catch (error) { return reply.code(502).send({ error: String(error) }); }
+});
 app.get('/api/update/status', { preHandler: auth }, async () => updater.status());
 app.post('/api/update/check', { preHandler: auth }, async (request, reply) => {
   try { return await updater.check(); } catch (error) { return reply.code(502).send({ error: String(error) }); }

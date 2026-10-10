@@ -64,6 +64,12 @@ PORT=6666 ADMIN_PASSWORD=请设置管理员密码 npm run web:start
 
 不要将 `node_modules`、`data/lottery.db`、`data/.encryption-key`、Cookie、管理员密码或 GitHub Token 提交到 Git。服务器安装固定脚本可参考 [`deploy/lottery-web-update`](deploy/lottery-web-update)。
 
+### AI 评论与转发
+
+控制台的“AI 设置”支持 OpenAI、DeepSeek、通义千问、硅基流动以及自定义 OpenAI 兼容接口。可以分别开启 AI 抽奖判断、评论生成和转发附言，并为每个 B 站账号覆盖开关和提示词。提示词支持 `{dynamic_text}`、`{author}`、`{lottery_conditions}`、`{draw_time}` 和 `{account_name}` 变量。
+
+API Key 使用 AES-256-GCM 加密后写入 SQLite，接口只返回“已配置”和脱敏尾缀。AI 请求只包含公开动态文本，不包含 Cookie、UID、管理员密码或加密密钥。AI 请求超时、限流、超长或命中敏感词时，评论使用备用文案，转发附言使用备用文案或按配置留空，不会阻塞其他账号的串行任务。
+
 **声明**: 此脚本仅用于学习和测试，作者本人并不对其负责，请于运行测试完成后自行删除，请勿滥用！
 
 ---------------------------------

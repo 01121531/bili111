@@ -12,6 +12,7 @@ module.exports = Object.freeze({
      * - `CHAT_CAPTCHA_OCR_URL` 验证码识别接口 POST `url`->`code`
      * - `ENABLE_AI_JUDGE` 是否启用AI判断抽奖过滤过期抽奖
      * - `ENABLE_AI_COMMENTS` 是否启用AI评论
+     * - `ENABLE_AI_RELAY` 是否启用AI生成转发附言
      * 
      * ## 调试相关
      * - `LOTTERY_LOG_LEVEL` 输出日志等级 Error<Warn<Notice<Info<Debug 0<1<2<3<4

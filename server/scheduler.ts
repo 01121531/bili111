@@ -1,13 +1,14 @@
 import { EventEmitter } from 'node:events';
 import { AppDatabase } from './db';
 import { EngineRunner } from './engine';
+import { AiService } from './ai';
 
 export class SerialScheduler {
   queue: number[] = [];
   running = false;
   events = new EventEmitter();
   engine: EngineRunner;
-  constructor(private db: AppDatabase) { this.engine = new EngineRunner(db, event => this.events.emit('event', event)); }
+  constructor(private db: AppDatabase, ai = new AiService(db)) { this.engine = new EngineRunner(db, event => this.events.emit('event', event), ai); }
   enqueue(accountId: number, type: string) { const job = this.db.createJob(accountId, type); this.queue.push(job.id); this.events.emit('event', { type: 'job', payload: job }); this.pump(); return job; }
   cancel(jobId: number) { if (this.engine.cancel(jobId)) return true; this.db.updateJob(jobId, 'cancelled'); this.queue = this.queue.filter(id => id !== jobId); return true; }
   async pump() {

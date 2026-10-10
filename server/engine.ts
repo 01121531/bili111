@@ -4,19 +4,33 @@ import { join } from 'node:path';
 import { AppDatabase, AccountRow } from './db';
 import { decrypt } from './security';
 import { runtimeConfig } from './config';
+import { AiService } from './ai';
 
 export type EngineResult = { code: number; discovered: number; attempted: number; success: number; errors: number };
 
 export class EngineRunner {
   processes = new Map<number, ChildProcessWithoutNullStreams>();
-  constructor(private db: AppDatabase, private emit: (event: object) => void) {}
+  constructor(private db: AppDatabase, private emit: (event: object) => void, private ai: AiService) {}
 
   run(jobId: number, runId: number, account: AccountRow, mode: string, config: Record<string, unknown>): Promise<EngineResult> {
     const runtimePath = join(process.cwd(), 'my_config.js');
-    writeFileSync(runtimePath, `module.exports = ${JSON.stringify(runtimeConfig(account.id, config), null, 2)};\n`, 'utf8');
+    const aiConfig = this.ai.resolve(account.id);
+    writeFileSync(runtimePath, `module.exports = ${JSON.stringify(runtimeConfig(account.id, config, aiConfig), null, 2)};\n`, 'utf8');
+    const aiEnv = {
+      AI_API_KEY: aiConfig.apiKey || '',
+      ENABLE_AI_JUDGE: aiConfig.apiKey && aiConfig.enableJudge ? '1' : '',
+      ENABLE_AI_COMMENTS: aiConfig.apiKey && aiConfig.enableComments ? '1' : '',
+      ENABLE_AI_RELAY: aiConfig.apiKey && aiConfig.enableRelay ? '1' : '',
+      AI_MAX_REQUESTS_PER_RUN: String(aiConfig.maxRequestsPerRun),
+      AI_FALLBACK_COMMENT: aiConfig.fallbackComment,
+      AI_FALLBACK_RELAY: aiConfig.fallbackRelay,
+      AI_ALLOW_EMPTY_RELAY: aiConfig.allowEmptyRelay ? '1' : '',
+      AI_SENSITIVE_WORDS: JSON.stringify(aiConfig.sensitiveWords),
+      NOTE: account.note || ''
+    };
     const child = spawn(process.execPath, [join(process.cwd(), 'main.js'), mode], {
       cwd: process.cwd(),
-      env: { ...process.env, COOKIE: decrypt(account.cookie), NUMBER: String(account.id), LOTTERY_LOG_LEVEL: '3' },
+      env: { ...process.env, COOKIE: decrypt(account.cookie), NUMBER: String(account.id), LOTTERY_LOG_LEVEL: '3', ...aiEnv },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     this.processes.set(jobId, child);

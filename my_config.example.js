@@ -368,6 +368,15 @@ module.exports = Object.freeze({
         },
 
         /**
+         * AI 转发附言参数，需配合 ENABLE_AI_RELAY 使用
+         */
+        ai_relay_parm: {
+            url: '',
+            body: {},
+            prompt: ''
+        },
+
+        /**
          * 是否抄热评
          */
         is_copy_chat: false,
