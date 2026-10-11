@@ -42,6 +42,9 @@ const defaultConfig: AiConfig = {
   maxRequestsPerRun: 30, sensitiveWords: []
 };
 
+const accountOverrideKeys = ['enableJudge', 'enableComments', 'enableRelay', 'commentPrompt', 'relayPrompt'] as const;
+type AccountOverrideKey = typeof accountOverrideKeys[number];
+
 function number(value: unknown, fallback: number, min: number, max: number) { const parsed = Number(value); return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback; }
 function bool(value: unknown, fallback: boolean) { return typeof value === 'boolean' ? value : fallback; }
 function string(value: unknown, fallback: string, max = 4000) { return typeof value === 'string' ? value.slice(0, max) : fallback; }
@@ -86,6 +89,20 @@ function normalize(input: Record<string, unknown>, previous: AiConfig = defaultC
     allowEmptyRelay: bool(input.allowEmptyRelay, previous.allowEmptyRelay), maxRequestsPerRun: number(input.maxRequestsPerRun, previous.maxRequestsPerRun, 1, 200),
     sensitiveWords: Array.isArray(input.sensitiveWords) ? input.sensitiveWords.filter(item => typeof item === 'string').map(item => item.slice(0, 80)).slice(0, 100) : previous.sensitiveWords
   };
+}
+
+function normalizeAccountOverride(input: Record<string, unknown>) {
+  const override: Partial<Pick<AiConfig, AccountOverrideKey>> = {};
+  for (const key of accountOverrideKeys) {
+    if (!(key in input)) continue;
+    if (key === 'commentPrompt' || key === 'relayPrompt') {
+      const value = string(input[key], '').trim();
+      if (value) override[key] = value;
+    } else if (typeof input[key] === 'boolean') {
+      override[key] = input[key];
+    }
+  }
+  return override;
 }
 
 function publicConfig(config: AiConfig & { apiKeyConfigured?: boolean }) {
@@ -145,15 +162,13 @@ export class AiService {
 
   private accountOverride(accountId: number) {
     const config = this.db.getConfig(accountId) as Record<string, any>;
-    return (config.ai && typeof config.ai === 'object') ? config.ai as Record<string, unknown> : {};
+    return (config.ai && typeof config.ai === 'object') ? normalizeAccountOverride(config.ai as Record<string, unknown>) : {};
   }
 
   getAccountPublic(accountId: number) { return { ...this.accountOverride(accountId), inherited: true, apiKey: undefined }; }
   saveAccount(accountId: number, input: Record<string, unknown>) {
     const config = this.db.getConfig(accountId) as Record<string, any>;
-    const previous = this.accountOverride(accountId);
-    const ai = normalize(input, normalize(previous));
-    delete (ai as any).apiKey;
+    const ai = normalizeAccountOverride(input);
     this.db.setConfig(accountId, { ...config, ai });
     return this.getResolvedPublic(accountId);
   }
@@ -167,8 +182,9 @@ export class AiService {
   getResolvedPublic(accountId: number) { return publicConfig(this.resolve(accountId)); }
 
   async test(input: Record<string, unknown>, accountId?: number) {
-    const config = accountId ? this.resolve(accountId) : normalize(input, this.readStored());
-    if (typeof input.apiKey === 'string' && input.apiKey.trim()) config.apiKey = input.apiKey.trim();
+    const useDraft = !accountId && input.useDraft === true;
+    const config = accountId ? this.resolve(accountId) : useDraft ? normalize(input, this.readStored()) : this.readStored();
+    if (useDraft && typeof input.apiKey === 'string' && input.apiKey.trim()) config.apiKey = input.apiKey.trim();
     if (!config.apiKey) throw new Error('请先配置 API Key');
     const content = string(input.content, '请回复：AI 连接测试成功。', 1000);
     const result = await this.complete(config, config.commentPrompt, content);

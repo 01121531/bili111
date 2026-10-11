@@ -33,6 +33,35 @@ test('AI 网络错误会展示可定位原因且不会泄露 Key', async () => {
   } finally { globalThis.fetch = originalFetch; rmSync(item.directory, { recursive: true, force: true }); }
 });
 
+test('AI 测试默认使用已保存配置而不是旧页面草稿', async () => {
+  const item = await databaseFixture(); const originalFetch = globalThis.fetch; let requestedModel = '';
+  try {
+    const service = new AiService(item.db);
+    service.saveGlobal({ provider: 'custom', baseUrl: 'https://tierflow.cn/v1', model: 'tierflow', apiKey: 'test-key', retries: 0 });
+    globalThis.fetch = async (_input, init) => {
+      requestedModel = JSON.parse(String(init?.body || '{}')).model;
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'OK' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const result = await service.test({ model: 'tierflow_pro', baseUrl: 'https://invalid.example/v1', content: 'test' });
+    assert.equal(requestedModel, 'tierflow'); assert.equal(result.model, 'tierflow'); assert.equal(result.content, 'OK');
+  } finally { globalThis.fetch = originalFetch; rmSync(item.directory, { recursive: true, force: true }); }
+});
+
+test('账号 AI 覆盖不会固化全局供应商、模型或 API Key', async () => {
+  const item = await databaseFixture();
+  try {
+    const service = new AiService(item.db);
+    service.saveGlobal({ provider: 'custom', baseUrl: 'https://tierflow.cn/v1', model: 'tierflow', apiKey: 'global-key' });
+    const account = item.db.createAccount({ uid: '456', name: '账号', cookie: encrypt('DedeUserID=456') })!;
+    service.saveAccount(account.id, { provider: 'legacy', baseUrl: 'https://legacy.example/v1', model: 'tierflow_pro', apiKey: 'account-key', enableJudge: true, commentPrompt: '账号评论', relayPrompt: '' });
+    const stored = (item.db.getConfig(account.id) as any).ai;
+    assert.deepEqual(stored, { enableJudge: true, commentPrompt: '账号评论' });
+    assert.equal(service.resolve(account.id).model, 'tierflow'); assert.equal(service.resolve(account.id).apiKey, 'global-key');
+    service.saveGlobal({ model: 'tierflow-next' });
+    assert.equal(service.resolve(account.id).model, 'tierflow-next'); assert.equal(service.resolve(account.id).commentPrompt, '账号评论');
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});
+
 test('重复 UID 添加会更新 Cookie 并保留账号 ID 和配置', async () => {
   const item = await databaseFixture();
   try {
