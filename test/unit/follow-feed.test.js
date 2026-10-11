@@ -138,3 +138,16 @@ test('合集账号来源按 UID 获取专栏并使用独立来源标记', async 
         bili.getArticlesByUID = originalGetArticlesByUID;
     }
 });
+
+test('专栏正文请求失败不会静默记录为成功 0 条', async () => {
+    const originalGetOneArticleByCv = bili.getOneArticleByCv;
+    bili.getOneArticleByCv = async () => null;
+    try {
+        const result = await new Searcher().getLotteryInfoFromArticles([
+            { id: 53378913, pub_time: Math.floor(Date.now() / 1000) }
+        ], 'article_uid');
+        assert.equal(result, null);
+    } finally {
+        bili.getOneArticleByCv = originalGetOneArticleByCv;
+    }
+});

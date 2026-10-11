@@ -25,18 +25,22 @@ async function withServer(handler, run) {
     }
 }
 
-test('HTTP 404 不重试', async () => {
-    let calls = 0;
-    await withServer((_, response) => {
-        calls += 1;
-        response.writeHead(404, { 'content-type': 'text/html' });
-        response.end('<html>not found</html>');
-    }, async url => {
-        const result = await request(url);
-        assert.equal(result.ok, false);
-        assert.match(result.error, /HTTP状态码:404/);
-    });
-    assert.equal(calls, 1);
+test('HTTP 404 和 412 不重试', async t => {
+    for (const statusCode of [404, 412]) {
+        await t.test(String(statusCode), async () => {
+            let calls = 0;
+            await withServer((_, response) => {
+                calls += 1;
+                response.writeHead(statusCode, { 'content-type': 'text/html' });
+                response.end('<html>request blocked</html>');
+            }, async url => {
+                const result = await request(url);
+                assert.equal(result.ok, false);
+                assert.match(result.error, new RegExp(`HTTP状态码:${statusCode}`));
+            });
+            assert.equal(calls, 1);
+        });
+    }
 });
 
 test('GET 对 429 和 5xx 执行有限重试', async t => {
