@@ -56,8 +56,10 @@ const fs = require('fs');
 const file = process.env.UPDATE_STATE_FILE;
 let current = {};
 try { current = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-const next = { ...current, status: process.env.UPDATE_STATUS, error: process.env.UPDATE_ERROR || undefined, currentCommit: process.env.UPDATE_COMMIT || undefined, rollback: process.env.UPDATE_ROLLBACK === 'true', finishedAt: new Date().toISOString() };
-if (process.env.UPDATE_DEPLOYED) next.deployedCommit = process.env.UPDATE_DEPLOYED;
+const deployed = process.env.UPDATE_DEPLOYED || undefined;
+const next = { ...current, status: process.env.UPDATE_STATUS, error: process.env.UPDATE_ERROR || undefined, currentCommit: deployed || process.env.UPDATE_COMMIT || undefined, rollback: process.env.UPDATE_ROLLBACK === 'true', finishedAt: new Date().toISOString() };
+if (deployed) next.deployedCommit = deployed;
+if (next.status === 'success' && deployed) next.remoteCommit = deployed;
 if (next.status === 'running') next.startedAt = new Date().toISOString();
 fs.writeFileSync(file, JSON.stringify(next, null, 2));
 NODE
@@ -99,14 +101,14 @@ cp -f "$DATA_DIR/.encryption-key" "$BACKUP_DIR/.encryption-key" 2>/dev/null || t
 
 if fetch_origin; then
   NEW_COMMIT="$(git -C "$APP_DIR" rev-parse "origin/$BRANCH")"
-  if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "已经是最新版本" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
+  if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
   git -C "$APP_DIR" reset --hard "$NEW_COMMIT" || rollback "切换到新版本失败"
 else
   log "git fetch 不可用，使用固定仓库 codeload 快照"
   TMP_DIR="$(mktemp -d)"
   trap 'rm -rf "$TMP_DIR"' EXIT
   NEW_COMMIT="$(github_curl 60 "https://api.github.com/repos/$REPO/commits/$BRANCH" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).sha));')" || rollback "获取 GitHub commit 失败"
-  if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "已经是最新版本" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
+  if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
   github_curl 600 "https://codeload.github.com/$REPO/tar.gz/$NEW_COMMIT" -o "$TMP_DIR/source.tar.gz" || rollback "下载 GitHub 源码失败"
   tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR" || rollback "解压 GitHub 源码失败"
   SOURCE_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
