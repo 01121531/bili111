@@ -8,6 +8,7 @@ import { encrypt } from '../../server/security';
 import { AccountVerifier } from '../../server/account-verifier';
 import { AiService, defaultAiConfig, resolveChatCompletionsUrl } from '../../server/ai';
 import { LotteryEnricher, parseDrawTime } from '../../server/lottery-enricher';
+import { diffFromDefaults, mergedConfig, publicConfigPayload, runtimeConfig, stringifyRuntimeConfig } from '../../server/config';
 
 async function databaseFixture() {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-web-fixes-'));
@@ -113,4 +114,56 @@ test('文本开奖时间只解析带明确开奖或截止语义的日期', () =>
   assert.ok(parseDrawTime('转评赞本动态，10月30日抽一位幸运用户送礼物', 1791656548));
   assert.equal(parseDrawTime('活动发布于10月20日，欢迎参加', 1791656548), null);
   assert.equal(parseDrawTime('开奖时间：13月40日', 1791656548), null);
+});
+
+test('网页不限制值在运行时恢复为 Infinity 且脚本序列化不变成 null', () => {
+  const payload = publicConfigPayload({ maxday: null, clear_quick_remove_attention_fans_number_smallest: null });
+  assert.equal(payload.effective.maxday, null);
+  assert.equal(payload.effective.clear_quick_remove_attention_fans_number_smallest, null);
+  assert.equal(mergedConfig({ maxday: null }).maxday, Infinity);
+  const source = stringifyRuntimeConfig(runtimeConfig(1, { maxday: null }));
+  assert.match(source, /"maxday": Infinity/);
+  assert.doesNotMatch(source, /"maxday": null/);
+});
+
+test('账号配置只保存相对默认值的差异', () => {
+  const payload = publicConfigPayload({});
+  const changed = { ...payload.effective, uid_scan_page: 8, maxday: null };
+  const result = diffFromDefaults(changed);
+  assert.deepEqual(result.diff, { uid_scan_page: 8 });
+  assert.equal(result.effective.maxday, null);
+});
+
+test('已参与状态不会被后续发现或筛选覆盖并保留事件历史', async () => {
+  const item = await databaseFixture();
+  try {
+    const account = item.db.createAccount({ uid: '999', cookie: encrypt('DedeUserID=999') })!;
+    const job = item.db.createJob(account.id, 'start'); const runId = item.db.createRun(job.id, account.id);
+    item.db.upsertLottery(account.id, { dyid: '200000001', status: 'candidate', resultReason: '符合条件', runId });
+    item.db.upsertLottery(account.id, { dyid: '200000001', status: 'participated', resultReason: '参与操作完成', runId });
+    item.db.upsertLottery(account.id, { dyid: '200000001', status: 'filtered', resultReason: '正文命中屏蔽词', runId });
+    const row: any = item.db.listLotteries()[0];
+    assert.equal(row.discovery_status, 'filtered');
+    assert.equal(row.participation_status, 'participated');
+    assert.ok(row.participated_at);
+    const events: any[] = item.db.listLotteryEvents(row.id);
+    assert.equal(events.length, 3);
+    assert.equal(events.some(event => event.stage === 'participation' && event.status === 'participated'), true);
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});
+
+test('抽奖列表分页筛选且顶部统计保持全量', async () => {
+  const item = await databaseFixture();
+  try {
+    const account = item.db.createAccount({ uid: '888', name: '分页账号', cookie: encrypt('DedeUserID=888') })!;
+    item.db.upsertLottery(account.id, { dyid: '300000001', source: 'follow_feed', author: '甲', status: 'candidate' });
+    item.db.upsertLottery(account.id, { dyid: '300000002', source: 'api', author: '乙', status: 'filtered', resultReason: '关键词不符' });
+    item.db.upsertLottery(account.id, { dyid: '300000003', source: 'follow_feed', author: '丙', status: 'participated' });
+    const page: any = item.db.listLotteries({ page: 1, pageSize: 10, source: 'api' });
+    assert.equal(page.items.length, 1);
+    assert.equal(page.total, 1);
+    assert.equal(page.stats.candidate, 2);
+    assert.equal(page.stats.filtered, 1);
+    assert.equal(page.stats.participated, 1);
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });

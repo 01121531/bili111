@@ -9,7 +9,7 @@ import { AppDatabase } from './db';
 import { encrypt, verifyPassword } from './security';
 import { createQrSession, pollQrSession, verifyBiliCookie } from './bili';
 import { SerialScheduler } from './scheduler';
-import { mergedConfig } from './config';
+import { diffFromDefaults, publicConfigPayload, validateWebConfig } from './config';
 import { UpdateService } from './updater';
 import { AiService } from './ai';
 import { AccountScheduleService, nextScheduleRun, scheduleJobTypes } from './account-schedules';
@@ -85,7 +85,11 @@ app.delete('/api/schedules/:id', { preHandler: auth }, async (request, reply) =>
   const id = parseId((request.params as any).id); if (!db.getSchedule(id)) return reply.code(404).send({ error: '定时任务不存在' }); db.deleteSchedule(id); return { ok: true };
 });
 app.get('/api/runs', { preHandler: auth }, async () => db.listRuns());
-app.get('/api/runs/:id/logs', { preHandler: auth }, async (request) => db.listLogs(parseId((request.params as any).id)));
+app.get('/api/runs/:id', { preHandler: auth }, async (request, reply) => { const row = db.getRun(parseId((request.params as any).id)); return row || reply.code(404).send({ error: '运行记录不存在' }); });
+app.get('/api/runs/:id/logs', { preHandler: auth }, async (request) => {
+  const query = (request.query || {}) as any;
+  return db.listLogs(parseId((request.params as any).id), { cursor: Number(query.cursor) || undefined, limit: Number(query.limit) || 200, level: query.level || undefined, search: query.search || undefined, errorsOnly: query.errorsOnly === '1' || query.errorsOnly === 'true' });
+});
 app.get('/api/logs/stream', { preHandler: auth }, async (request, reply) => {
   reply.hijack();
   reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -100,14 +104,21 @@ app.get('/api/logs/stream', { preHandler: auth }, async (request, reply) => {
   scheduler.events.on('event', handler);
   request.raw.on('close', cleanup);
 });
-app.get('/api/lotteries', { preHandler: auth }, async () => db.listLotteries());
+app.get('/api/lotteries', { preHandler: auth }, async (request) => {
+  const query = (request.query || {}) as any;
+  return db.listLotteries({ page: Number(query.page) || 1, pageSize: Number(query.pageSize) || 25, accountId: Number(query.accountId) || undefined, source: query.source || undefined, discoveryStatus: query.discoveryStatus || undefined, participationStatus: query.participationStatus || undefined, search: query.search || undefined, from: query.from || undefined, to: query.to || undefined });
+});
+app.get('/api/lotteries/:id/events', { preHandler: auth }, async (request) => db.listLotteryEvents(parseId((request.params as any).id)));
 app.get('/api/lotteries/backfill/status', { preHandler: auth }, async () => enricher.status());
 app.post('/api/lotteries/backfill', { preHandler: auth }, async (request, reply) => { const result = await enricher.runBatch(true); return result.accepted ? result : reply.code(409).send({ error: 'reason' in result ? result.reason : '补全任务暂不可用', ...result }); });
 app.get('/api/wins', { preHandler: auth }, async () => db.listWins());
 app.patch('/api/wins/:id/read', { preHandler: auth }, async (request) => { db.markWinRead(parseId((request.params as any).id)); return { ok: true }; });
 app.get('/api/stats/overview', { preHandler: auth }, async () => db.stats());
-app.get('/api/config', { preHandler: auth }, async () => ({ defaultConfig: mergedConfig({}), keys: Object.keys(mergedConfig({})) }));
-app.put('/api/config', { preHandler: auth }, async (request) => { db.setSetting('global_config', JSON.stringify(request.body || {})); return { ok: true }; });
+app.get('/api/config', { preHandler: auth }, async () => publicConfigPayload({}));
+app.put('/api/config', { preHandler: auth }, async (request, reply) => {
+  try { const config = validateWebConfig(request.body || {}); db.setSetting('global_config', JSON.stringify(config)); return { ok: true, ...publicConfigPayload(config) }; }
+  catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : '配置无效' }); }
+});
 app.post('/api/config/import', { preHandler: auth }, async (request, reply) => {
   const body = request.body as { config?: object; accounts?: Array<{ cookie?: string; note?: string }> };
   if (!body || typeof body !== 'object') return reply.code(400).send({ error: '导入内容必须是 JSON 对象' });
@@ -122,8 +133,15 @@ app.post('/api/config/import', { preHandler: auth }, async (request, reply) => {
   }
   return { ok: true, imported };
 });
-app.get('/api/accounts/:id/config', { preHandler: auth }, async (request) => mergedConfig(db.getConfig(parseId((request.params as any).id))));
-app.put('/api/accounts/:id/config', { preHandler: auth }, async (request) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return { error: '账号不存在' }; db.setConfig(id, request.body as Record<string, unknown>); return mergedConfig(request.body as Record<string, unknown>); });
+app.get('/api/accounts/:id/config', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return publicConfigPayload(db.getConfig(id)); });
+app.put('/api/accounts/:id/config', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  try {
+    const existing = db.getConfig(id) as Record<string, unknown>; const { diff } = diffFromDefaults(request.body || {});
+    if (existing.ai) diff.ai = existing.ai;
+    db.setConfig(id, diff); return publicConfigPayload(diff);
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : '配置无效' }); }
+});
 app.get('/api/config/export', { preHandler: auth }, async () => ({ accounts: db.listAccounts().map(publicAccount), exportedAt: new Date().toISOString() }));
 app.get('/api/ai/providers', { preHandler: auth }, async () => ai.listProviders());
 app.get('/api/ai/config', { preHandler: auth }, async () => ai.getGlobalPublic());

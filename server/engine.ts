@@ -3,12 +3,12 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AppDatabase, AccountRow } from './db';
 import { decrypt } from './security';
-import { runtimeConfig } from './config';
+import { runtimeConfig, stringifyRuntimeConfig } from './config';
 import { AiService } from './ai';
 import { EmailNotificationService, RuntimeEvent } from './notifications';
 import { parseDrawTime } from './lottery-enricher';
 
-export type EngineResult = { code: number; discovered: number; attempted: number; success: number; errors: number };
+export type EngineResult = { code: number; discovered: number; candidates: number; attempted: number; success: number; failed: number; errors: number };
 
 export class EngineRunner {
   processes = new Map<number, ChildProcessWithoutNullStreams>();
@@ -18,7 +18,7 @@ export class EngineRunner {
     const cliMode = mode === 'discover' ? 'start' : mode;
     const runtimePath = join(process.cwd(), 'my_config.js');
     const aiConfig = this.ai.resolve(account.id);
-    writeFileSync(runtimePath, `module.exports = ${JSON.stringify(runtimeConfig(account.id, config, aiConfig), null, 2)};\n`, 'utf8');
+    writeFileSync(runtimePath, `module.exports = ${stringifyRuntimeConfig(runtimeConfig(account.id, config, aiConfig))};\n`, 'utf8');
     const aiEnv = {
       AI_API_KEY: aiConfig.apiKey || '',
       ENABLE_AI_JUDGE: aiConfig.apiKey && aiConfig.enableJudge ? '1' : '',
@@ -45,7 +45,8 @@ export class EngineRunner {
       stdio: ['ignore', 'pipe', 'pipe']
     });
     this.processes.set(jobId, child);
-    let discovered = 0; let attempted = 0; let success = 0; let errors = 0; let stdoutBuffer = ''; let stderrBuffer = ''; const runtimeEvents: RuntimeEvent[] = []; const discoveredIds = new Set<string>();
+    let processErrors = 0; let stdoutBuffer = ''; let stderrBuffer = ''; const runtimeEvents: RuntimeEvent[] = [];
+    const discoveredIds = new Set<string>(); const candidateIds = new Set<string>(); const attemptedIds = new Set<string>(); const participatedIds = new Set<string>(); const failedIds = new Set<string>();
     const consumeLine = (raw: string, level: string) => {
       const message = raw.trim(); if (!message) return;
       if (message.startsWith('[LOTTERY_WEB_EVENT]')) {
@@ -55,23 +56,26 @@ export class EngineRunner {
             const dyid = String(event.lottery.dyid);
             const description = String(event.lottery.description || ''); const sourceCreatedAt = Number(event.lottery.sourceCreatedAt || 0) || null;
             const drawTime = Number(event.lottery.drawTime || 0) || parseDrawTime(description, sourceCreatedAt);
-            if (!discoveredIds.has(dyid)) { discoveredIds.add(dyid); discovered += 1; }
+            discoveredIds.add(dyid);
+            const lotteryStatus = String(event.lottery.status || '');
+            if (['candidate', 'participated', 'failed'].includes(lotteryStatus) || event.lottery.resultReason === '已参与或已转发') candidateIds.add(dyid);
+            if (['participated', 'failed'].includes(lotteryStatus)) attemptedIds.add(dyid);
+            if (lotteryStatus === 'participated') { participatedIds.add(dyid); failedIds.delete(dyid); }
+            if (lotteryStatus === 'failed' && !participatedIds.has(dyid)) failedIds.add(dyid);
             this.db.upsertLottery(account.id, {
               dyid, source: String(event.lottery.source || '') || undefined, author: String(event.lottery.author || '') || undefined,
               description: description || undefined, drawTime,
               official: event.lottery.official === undefined ? undefined : Boolean(event.lottery.official), status: String(event.lottery.status || '') || undefined,
               resultReason: event.lottery.resultReason === undefined ? undefined : String(event.lottery.resultReason || ''), url: String(event.lottery.url || '') || undefined,
-              sourceCreatedAt, enrichmentStatus: event.lottery.description ? 'complete' : undefined
+              sourceCreatedAt, enrichmentStatus: event.lottery.description ? 'complete' : undefined, runId
             });
           } else runtimeEvents.push(event as unknown as RuntimeEvent);
         }
-        catch { errors += 1; }
+        catch { processErrors += 1; }
         return;
       }
       const safe = message.replace(/(SESSDATA|bili_jct|DedeUserID|buvid3)=[^;\s]+/gi, '$1=••••••');
-      if (/成功/.test(safe)) success += 1;
-      if (level === 'error' || /\[(?:Error|错误)\]/i.test(safe)) errors += 1;
-      if (mode !== 'discover' && /转发|评论|点赞|关注|预约/.test(safe)) attempted += 1;
+      if (level === 'error' || /\[(?:Error|错误)\]/i.test(safe)) processErrors += 1;
       const context = safe.match(/\[帐号\d+ ([^\]]+)/)?.[1] || 'engine';
       const log = this.db.addLog(runId, account.id, level, context, safe);
       this.emit({ type: 'log', payload: log });
@@ -88,7 +92,7 @@ export class EngineRunner {
       consumeLine(stdoutBuffer, 'info'); consumeLine(stderrBuffer, 'error');
       const notificationLog = (level: string, message: string) => { const log = this.db.addLog(runId, account.id, level, '邮件通知', message); this.emit({ type: 'log', payload: log }); };
       void this.notifications.handleRuntimeEvents(account.id, runId, runtimeEvents, notificationLog).catch(error => notificationLog('error', `通知处理失败：${error instanceof Error ? error.message : String(error)}`));
-      resolve({ code: code ?? 1, discovered, attempted, success, errors });
+      resolve({ code: code ?? 1, discovered: discoveredIds.size, candidates: candidateIds.size, attempted: attemptedIds.size, success: participatedIds.size, failed: failedIds.size, errors: processErrors });
     }));
   }
 
