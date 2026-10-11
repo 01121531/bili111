@@ -159,11 +159,17 @@ test('抽奖列表分页筛选且顶部统计保持全量', async () => {
     item.db.upsertLottery(account.id, { dyid: '300000001', source: 'follow_feed', author: '甲', status: 'candidate' });
     item.db.upsertLottery(account.id, { dyid: '300000002', source: 'api', author: '乙', status: 'filtered', resultReason: '关键词不符' });
     item.db.upsertLottery(account.id, { dyid: '300000003', source: 'follow_feed', author: '丙', status: 'participated' });
+    item.db.upsertLottery(account.id, { dyid: '300000004', source: 'follow_feed', author: '丁', status: 'filtered', resultReason: '已参与或已转发' });
     const page: any = item.db.listLotteries({ page: 1, pageSize: 10, source: 'api' });
     assert.equal(page.items.length, 1);
     assert.equal(page.total, 1);
-    assert.equal(page.stats.candidate, 2);
+    assert.equal(page.stats.candidate, 3);
     assert.equal(page.stats.filtered, 1);
-    assert.equal(page.stats.participated, 1);
+    assert.equal(page.stats.participated, 2);
+    assert.equal(page.stats.participatedConfirmed, 1);
+    assert.equal(page.stats.participatedBefore, 1);
+    const participated: any = item.db.listLotteries({ page: 1, pageSize: 10, participationStatus: 'participated,already_participated' });
+    assert.equal(participated.total, 2);
+    assert.deepEqual(new Set(participated.items.map((row: any) => row.participation_status)), new Set(['participated', 'already_participated']));
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });

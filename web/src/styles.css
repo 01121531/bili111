@@ -242,7 +242,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
 .status-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
 .status-metrics button { min-height: 78px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); display: flex; justify-content: space-between; align-items: center; padding: 16px; box-shadow: var(--shadow); }
 .status-metrics button.active { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 15%, transparent); }
-.status-metrics span { color: var(--text-muted); }
+.status-metrics span { color: var(--text-muted); display: grid; gap: 3px; }
+.status-metrics span small { color: var(--text-subtle); font-size: .72rem; font-weight: 400; }
 .status-metrics strong { font-size: 1.45rem; }
 .filter-grid { display: grid; grid-template-columns: minmax(260px, 1fr) repeat(4, minmax(130px, auto)); }
 .lottery-list { display: grid; }

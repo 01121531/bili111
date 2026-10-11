@@ -160,7 +160,12 @@ export class AppDatabase {
     if (query.accountId) { where.push('l.account_id=?'); params.push(query.accountId); }
     if (query.source) { where.push('l.source=?'); params.push(query.source); }
     if (query.discoveryStatus) { where.push('l.discovery_status=?'); params.push(query.discoveryStatus); }
-    if (query.participationStatus) { where.push('l.participation_status=?'); params.push(query.participationStatus); }
+    if (query.participationStatus) {
+      const allowed = new Set(['not_attempted', 'participated', 'already_participated', 'failed']);
+      const statuses = String(query.participationStatus).split(',').map(item => item.trim()).filter(item => allowed.has(item));
+      if (statuses.length === 1) { where.push('l.participation_status=?'); params.push(statuses[0]); }
+      else if (statuses.length > 1) { where.push(`l.participation_status IN (${statuses.map(() => '?').join(',')})`); params.push(...statuses); }
+    }
     if (query.from) { where.push('l.created_at>=?'); params.push(query.from); }
     if (query.to) { where.push('l.created_at<=?'); params.push(query.to); }
     if (query.search) { where.push('(l.dyid LIKE ? OR l.author LIKE ? OR l.description LIKE ? OR l.result_reason LIKE ?)'); const term = `%${query.search}%`; params.push(term, term, term, term); }
@@ -168,7 +173,9 @@ export class AppDatabase {
     const total = Number(this.row<any>(`SELECT COUNT(*) count FROM lotteries l ${clause}`, params)?.count || 0);
     const items = this.rows(`SELECT l.*,a.name account_name FROM lotteries l JOIN accounts a ON a.id=l.account_id ${clause} ORDER BY l.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
     const countAll = (condition: string) => Number(this.row<any>(`SELECT COUNT(*) count FROM lotteries l WHERE ${condition}`)?.count || 0);
-    return { items, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), stats: { candidate: countAll("l.discovery_status='candidate'"), participated: countAll("l.participation_status='participated'"), filtered: countAll("l.discovery_status='filtered'"), failed: countAll("l.participation_status='failed'") } };
+    const participatedConfirmed = countAll("l.participation_status='participated'");
+    const participatedBefore = countAll("l.participation_status='already_participated'");
+    return { items, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), stats: { candidate: countAll("l.discovery_status='candidate'"), participated: participatedConfirmed + participatedBefore, participatedConfirmed, participatedBefore, filtered: countAll("l.discovery_status='filtered'"), failed: countAll("l.participation_status='failed'") } };
   }
   listLotteryEvents(lotteryId: number) { return this.rows('SELECT e.*,r.status run_status,j.type run_type FROM lottery_events e LEFT JOIN runs r ON r.id=e.run_id LEFT JOIN jobs j ON j.id=r.job_id WHERE e.lottery_id=? ORDER BY e.id DESC LIMIT 100', [lotteryId]); }
   listLotteryBackfillCandidates(limit = 20) { return this.rows<any>("SELECT l.*,a.cookie,a.cookie_status FROM lotteries l JOIN accounts a ON a.id=l.account_id WHERE a.enabled=1 AND a.cookie_status!='invalid' AND l.enrichment_status!='failed' AND (l.description IS NULL OR l.description='' OR l.enrichment_status='pending') ORDER BY l.id LIMIT ?", [limit]); }
