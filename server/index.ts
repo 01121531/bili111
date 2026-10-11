@@ -102,6 +102,10 @@ app.delete('/api/schedules/:id', { preHandler: auth }, async (request, reply) =>
 });
 app.get('/api/runs', { preHandler: auth }, async () => db.listRuns());
 app.get('/api/runs/:id', { preHandler: auth }, async (request, reply) => { const row = db.getRun(parseId((request.params as any).id)); return row || reply.code(404).send({ error: '运行记录不存在' }); });
+app.get('/api/runs/:id/participations', { preHandler: auth }, async (request) => {
+  const query = (request.query || {}) as any;
+  return db.listRunParticipations(parseId((request.params as any).id), { page: Number(query.page) || 1, pageSize: Number(query.pageSize) || 25, status: query.status || undefined, search: query.search || undefined });
+});
 app.get('/api/runs/:id/logs', { preHandler: auth }, async (request) => {
   const query = (request.query || {}) as any;
   return db.listLogs(parseId((request.params as any).id), { cursor: Number(query.cursor) || undefined, limit: Number(query.limit) || 200, level: query.level || undefined, search: query.search || undefined, errorsOnly: query.errorsOnly === '1' || query.errorsOnly === 'true' });
@@ -125,6 +129,10 @@ app.get('/api/lotteries', { preHandler: auth }, async (request) => {
   return db.listLotteries({ page: Number(query.page) || 1, pageSize: Number(query.pageSize) || 25, accountId: Number(query.accountId) || undefined, source: query.source || undefined, discoveryStatus: query.discoveryStatus || undefined, participationStatus: query.participationStatus || undefined, search: query.search || undefined, from: query.from || undefined, to: query.to || undefined });
 });
 app.get('/api/lotteries/:id/events', { preHandler: auth }, async (request) => db.listLotteryEvents(parseId((request.params as any).id)));
+app.get('/api/lotteries/:id/participations', { preHandler: auth }, async (request) => {
+  const query = (request.query || {}) as any;
+  return db.listLotteryParticipations(parseId((request.params as any).id), { page: Number(query.page) || 1, pageSize: Number(query.pageSize) || 25, status: query.status || undefined, search: query.search || undefined });
+});
 app.get('/api/lotteries/backfill/status', { preHandler: auth }, async () => enricher.status());
 app.post('/api/lotteries/backfill', { preHandler: auth }, async (request, reply) => { const result = await enricher.runBatch(true); return result.accepted ? result : reply.code(409).send({ error: 'reason' in result ? result.reason : '补全任务暂不可用', ...result }); });
 app.get('/api/wins', { preHandler: auth }, async () => db.listWins());

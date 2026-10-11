@@ -141,14 +141,16 @@ test('已参与状态不会被后续发现或筛选覆盖并保留事件历史',
     const job = item.db.createJob(account.id, 'start'); const runId = item.db.createRun(job.id, account.id);
     item.db.upsertLottery(account.id, { dyid: '200000001', status: 'candidate', resultReason: '符合条件', runId });
     item.db.upsertLottery(account.id, { dyid: '200000001', status: 'participated', resultReason: '参与操作完成', runId });
+    item.db.upsertLottery(account.id, { dyid: '200000001', status: 'partial', resultReason: '评论成功但转发失败', runId });
     item.db.upsertLottery(account.id, { dyid: '200000001', status: 'filtered', resultReason: '正文命中屏蔽词', runId });
     const row: any = item.db.listLotteries()[0];
     assert.equal(row.discovery_status, 'filtered');
     assert.equal(row.participation_status, 'participated');
     assert.ok(row.participated_at);
     const events: any[] = item.db.listLotteryEvents(row.id);
-    assert.equal(events.length, 3);
+    assert.equal(events.length, 4);
     assert.equal(events.some(event => event.stage === 'participation' && event.status === 'participated'), true);
+    assert.equal(events.some(event => event.stage === 'participation' && event.status === 'partial'), true);
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
 
@@ -171,5 +173,36 @@ test('抽奖列表分页筛选且顶部统计保持全量', async () => {
     const participated: any = item.db.listLotteries({ page: 1, pageSize: 10, participationStatus: 'participated,already_participated' });
     assert.equal(participated.total, 2);
     assert.deepEqual(new Set(participated.items.map((row: any) => row.participation_status)), new Set(['participated', 'already_participated']));
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});
+
+test('参与明细按账号和运行隔离并保存实际评论与转发文案', async () => {
+  const item = await databaseFixture();
+  try {
+    const first = item.db.createAccount({ uid: '701', name: '账号一', cookie: encrypt('DedeUserID=701') })!;
+    const second = item.db.createAccount({ uid: '702', name: '账号二', cookie: encrypt('DedeUserID=702') })!;
+    const firstRun = item.db.createRun(item.db.createJob(first.id, 'start').id, first.id);
+    const secondRun = item.db.createRun(item.db.createJob(second.id, 'start').id, second.id);
+    const lottery = item.db.upsertLottery(first.id, { dyid: '400000001', author: '抽奖作者', description: '关注并转发本动态参与抽奖', status: 'candidate', runId: firstRun });
+    item.db.upsertParticipation(first.id, firstRun, {
+      dyid: '400000001', overallStatus: 'partial', resultCode: 5004, resultReason: '转发失败：操作频繁',
+      comment: { plannedText: 'AI 评论', actualText: '[doge][doge][doge][doge][doge]', source: 'safety_fallback', status: 'success', reason: '评论成功' },
+      follow: { status: 'success', reason: '关注状态正常' }, like: { status: 'success', reason: '点赞成功' },
+      relay: { plannedText: '祝好运', actualText: '祝好运', source: 'ai', status: 'failed', code: 4, reason: '转发失败：操作频繁' }
+    });
+    item.db.upsertParticipation(first.id, firstRun, {
+      dyid: '400000001', overallStatus: 'success', resultReason: '参与操作完成',
+      comment: { actualText: '最终评论', source: 'ai', status: 'success' }, relay: { actualText: '', source: 'empty', status: 'success', reason: '使用空附言转发成功' }
+    });
+    item.db.upsertLottery(second.id, { dyid: '400000001', author: '抽奖作者', status: 'candidate', runId: secondRun });
+    item.db.upsertParticipation(second.id, secondRun, { dyid: '400000001', overallStatus: 'failed', resultCode: 1008, resultReason: '评论失败：内容包含敏感信息', comment: { actualText: '失败评论', source: 'ai', status: 'failed', code: 8 } });
+
+    const firstPage: any = item.db.listRunParticipations(firstRun, { search: '最终评论' });
+    assert.equal(firstPage.total, 1); assert.equal(firstPage.summary.success, 1); assert.equal(firstPage.summary.partial, 0);
+    assert.equal(firstPage.items[0].comment_text, '最终评论'); assert.equal(firstPage.items[0].relay_text, ''); assert.equal(firstPage.items[0].relay_source, 'empty');
+    const lotteryHistory: any = item.db.listLotteryParticipations(lottery.id);
+    assert.equal(lotteryHistory.total, 1); assert.equal(lotteryHistory.items[0].account_name, '账号一');
+    const secondPage: any = item.db.listRunParticipations(secondRun);
+    assert.equal(secondPage.summary.failed, 1); assert.equal(secondPage.items[0].comment_text, '失败评论');
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });

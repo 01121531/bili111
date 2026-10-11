@@ -8,7 +8,7 @@ import { AiService } from './ai';
 import { EmailNotificationService, RuntimeEvent } from './notifications';
 import { parseDrawTime } from './lottery-enricher';
 
-export type EngineResult = { code: number; discovered: number; candidates: number; attempted: number; success: number; failed: number; errors: number };
+export type EngineResult = { code: number; discovered: number; candidates: number; attempted: number; success: number; partial: number; failed: number; errors: number };
 
 export class EngineRunner {
   processes = new Map<number, ChildProcessWithoutNullStreams>();
@@ -48,21 +48,22 @@ export class EngineRunner {
     });
     this.processes.set(jobId, child);
     let processErrors = 0; let stdoutBuffer = ''; let stderrBuffer = ''; const runtimeEvents: RuntimeEvent[] = [];
-    const discoveredIds = new Set<string>(); const candidateIds = new Set<string>(); const attemptedIds = new Set<string>(); const participatedIds = new Set<string>(); const failedIds = new Set<string>();
+    const discoveredIds = new Set<string>(); const candidateIds = new Set<string>(); const attemptedIds = new Set<string>(); const participatedIds = new Set<string>(); const partialIds = new Set<string>(); const failedIds = new Set<string>();
     const consumeLine = (raw: string, level: string) => {
       const message = raw.trim(); if (!message) return;
       if (message.startsWith('[LOTTERY_WEB_EVENT]')) {
         try {
-          const event = JSON.parse(message.slice('[LOTTERY_WEB_EVENT]'.length)) as { type: string; lottery?: Record<string, unknown>; [key: string]: unknown };
+          const event = JSON.parse(message.slice('[LOTTERY_WEB_EVENT]'.length)) as { type: string; lottery?: Record<string, unknown>; participation?: Record<string, any>; [key: string]: unknown };
           if (event.type === 'lottery' && event.lottery?.dyid) {
             const dyid = String(event.lottery.dyid);
             const description = String(event.lottery.description || ''); const sourceCreatedAt = Number(event.lottery.sourceCreatedAt || 0) || null;
             const drawTime = Number(event.lottery.drawTime || 0) || parseDrawTime(description, sourceCreatedAt);
             discoveredIds.add(dyid);
             const lotteryStatus = String(event.lottery.status || '');
-            if (['candidate', 'participated', 'failed'].includes(lotteryStatus) || event.lottery.resultReason === '已参与或已转发') candidateIds.add(dyid);
-            if (['participated', 'failed'].includes(lotteryStatus)) attemptedIds.add(dyid);
+            if (['candidate', 'participated', 'partial', 'failed'].includes(lotteryStatus) || event.lottery.resultReason === '已参与或已转发') candidateIds.add(dyid);
+            if (['participated', 'partial', 'failed'].includes(lotteryStatus)) attemptedIds.add(dyid);
             if (lotteryStatus === 'participated') { participatedIds.add(dyid); failedIds.delete(dyid); }
+            if (lotteryStatus === 'partial' && !participatedIds.has(dyid)) { partialIds.add(dyid); failedIds.delete(dyid); }
             if (lotteryStatus === 'failed' && !participatedIds.has(dyid)) failedIds.add(dyid);
             this.db.upsertLottery(account.id, {
               dyid, source: String(event.lottery.source || '') || undefined, author: String(event.lottery.author || '') || undefined,
@@ -71,6 +72,17 @@ export class EngineRunner {
               resultReason: event.lottery.resultReason === undefined ? undefined : String(event.lottery.resultReason || ''), url: String(event.lottery.url || '') || undefined,
               sourceCreatedAt, enrichmentStatus: event.lottery.description ? 'complete' : undefined, runId
             });
+          } else if (event.type === 'lottery_participation' && event.participation?.dyid) {
+            const participation = event.participation; const dyid = String(participation.dyid);
+            const cleanText = (value: unknown, limit = 1000) => value === null || value === undefined ? null : String(value).replace(/(SESSDATA|bili_jct|DedeUserID|buvid3)=[^;\s]+/gi, '$1=••••••').slice(0, limit);
+            const cleanAction = (value: any = {}) => ({ plannedText: cleanText(value.plannedText), actualText: cleanText(value.actualText), source: cleanText(value.source, 40) || 'none', status: cleanText(value.status, 40) || 'not_required', code: Number(value.code) || 0, reason: cleanText(value.reason, 500) || undefined });
+            const overallStatus = ['success', 'partial', 'failed'].includes(String(participation.overallStatus)) ? String(participation.overallStatus) : 'failed';
+            const record = this.db.upsertParticipation(account.id, runId, { dyid, overallStatus, resultCode: Number(participation.code) || 0, resultReason: cleanText(participation.reason, 500) || undefined, comment: cleanAction(participation.comment), follow: cleanAction(participation.follow), like: cleanAction(participation.like), relay: cleanAction(participation.relay), startedAt: cleanText(participation.startedAt, 50) || undefined, finishedAt: cleanText(participation.finishedAt, 50) || undefined });
+            candidateIds.add(dyid); attemptedIds.add(dyid);
+            if (overallStatus === 'success') { participatedIds.add(dyid); partialIds.delete(dyid); failedIds.delete(dyid); }
+            if (overallStatus === 'partial' && !participatedIds.has(dyid)) { partialIds.add(dyid); failedIds.delete(dyid); }
+            if (overallStatus === 'failed' && !participatedIds.has(dyid) && !partialIds.has(dyid)) failedIds.add(dyid);
+            this.emit({ type: 'participation', payload: record });
           } else runtimeEvents.push(event as unknown as RuntimeEvent);
         }
         catch { processErrors += 1; }
@@ -94,7 +106,7 @@ export class EngineRunner {
       consumeLine(stdoutBuffer, 'info'); consumeLine(stderrBuffer, 'error');
       const notificationLog = (level: string, message: string) => { const log = this.db.addLog(runId, account.id, level, '邮件通知', message); this.emit({ type: 'log', payload: log }); };
       void this.notifications.handleRuntimeEvents(account.id, runId, runtimeEvents, notificationLog).catch(error => notificationLog('error', `通知处理失败：${error instanceof Error ? error.message : String(error)}`));
-      resolve({ code: code ?? 1, discovered: discoveredIds.size, candidates: candidateIds.size, attempted: attemptedIds.size, success: participatedIds.size, failed: failedIds.size, errors: processErrors });
+      resolve({ code: code ?? 1, discovered: discoveredIds.size, candidates: candidateIds.size, attempted: attemptedIds.size, success: participatedIds.size, partial: partialIds.size, failed: failedIds.size, errors: processErrors });
     }));
   }
 

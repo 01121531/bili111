@@ -9,7 +9,10 @@ export type ScheduleRow = { id: number; account_id: number; type: string; cron: 
 export type ScheduleSeed = { accountId: number; type: string; cron: string; enabled: boolean; nextRunAt: string | null; isOverride: boolean };
 export type NotificationRow = { id: number; account_id: number | null; run_id: number | null; channel: string; event_type: string; title: string; content: string; status: string; error: string | null; attempts: number; last_attempt_at: string | null; created_at: string };
 export type LotteryInput = { dyid: string; source?: string; author?: string; description?: string; drawTime?: number | null; official?: boolean; status?: string; resultReason?: string; url?: string; sourceCreatedAt?: number | null; enrichmentStatus?: string; runId?: number };
+export type ParticipationAction = { plannedText?: string | null; actualText?: string | null; source?: string; status?: string; code?: number; reason?: string };
+export type ParticipationInput = { dyid: string; overallStatus: string; resultCode?: number; resultReason?: string; comment?: ParticipationAction; follow?: ParticipationAction; like?: ParticipationAction; relay?: ParticipationAction; startedAt?: string; finishedAt?: string };
 export type LotteryQuery = { page?: number; pageSize?: number; accountId?: number; source?: string; discoveryStatus?: string; participationStatus?: string; search?: string; from?: string; to?: string };
+export type ParticipationQuery = { page?: number; pageSize?: number; status?: string; search?: string };
 export type LogQuery = { cursor?: number; limit?: number; level?: string; search?: string; errorsOnly?: boolean };
 
 export class AppDatabase {
@@ -43,6 +46,7 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, account_id INTEGER NOT NULL, level TEXT NOT NULL, context TEXT, message TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS lotteries (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, dyid TEXT NOT NULL, source TEXT, author TEXT, description TEXT, draw_time INTEGER, official INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'discovered', result_reason TEXT, url TEXT, source_created_at INTEGER, enrichment_status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, updated_at TEXT, UNIQUE(account_id,dyid));
       CREATE TABLE IF NOT EXISTS lottery_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, run_id INTEGER, lottery_id INTEGER NOT NULL, dyid TEXT NOT NULL, stage TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS participation_records (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, account_id INTEGER NOT NULL, lottery_id INTEGER NOT NULL, dyid TEXT NOT NULL, overall_status TEXT NOT NULL, result_code INTEGER NOT NULL DEFAULT 0, result_reason TEXT, comment_planned_text TEXT, comment_text TEXT, comment_source TEXT, comment_status TEXT NOT NULL DEFAULT 'not_required', comment_code INTEGER NOT NULL DEFAULT 0, comment_reason TEXT, follow_status TEXT NOT NULL DEFAULT 'not_required', follow_code INTEGER NOT NULL DEFAULT 0, follow_reason TEXT, like_status TEXT NOT NULL DEFAULT 'not_required', like_code INTEGER NOT NULL DEFAULT 0, like_reason TEXT, relay_planned_text TEXT, relay_text TEXT, relay_source TEXT, relay_status TEXT NOT NULL DEFAULT 'not_required', relay_code INTEGER NOT NULL DEFAULT 0, relay_reason TEXT, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, UNIQUE(run_id,lottery_id));
       CREATE TABLE IF NOT EXISTS win_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, source TEXT NOT NULL, actor TEXT, content TEXT NOT NULL, url TEXT, occurred_at TEXT, event_key TEXT, matched INTEGER NOT NULL DEFAULT 1, is_read INTEGER NOT NULL DEFAULT 0, detected_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, run_id INTEGER, channel TEXT NOT NULL, event_type TEXT NOT NULL DEFAULT '', title TEXT, content TEXT, status TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account_schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, type TEXT NOT NULL, cron TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_run_at TEXT, next_run_at TEXT, last_job_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(account_id,type));
@@ -68,6 +72,7 @@ export class AppDatabase {
     this.addColumn('lotteries', 'last_run_id INTEGER');
     this.addColumn('runs', 'candidate_count INTEGER NOT NULL DEFAULT 0');
     this.addColumn('runs', 'participated_count INTEGER NOT NULL DEFAULT 0');
+    this.addColumn('runs', 'partial_count INTEGER NOT NULL DEFAULT 0');
     this.addColumn('runs', 'failed_count INTEGER NOT NULL DEFAULT 0');
     this.addColumn('account_schedules', 'is_override INTEGER NOT NULL DEFAULT 1');
     this.db.run("UPDATE lotteries SET source='legacy' WHERE source IN ('start','discover')");
@@ -78,6 +83,8 @@ export class AppDatabase {
     this.db.run("UPDATE lotteries SET filter_reason=COALESCE(filter_reason,result_reason) WHERE discovery_status='filtered'");
     this.db.run('CREATE INDEX IF NOT EXISTS idx_lottery_events_lottery ON lottery_events(lottery_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_lotteries_status ON lotteries(discovery_status,participation_status,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_records_run ON participation_records(run_id,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_records_lottery ON participation_records(lottery_id,id)');
     this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_win_events_event_key ON win_events(event_key) WHERE event_key IS NOT NULL');
     this.flush(); if (!this.getSetting('admin_password_hash')) this.setSetting('admin_password_hash', hashPassword(process.env.ADMIN_PASSWORD || 'admin'));
   }
@@ -131,7 +138,7 @@ export class AppDatabase {
     this.run("UPDATE runs SET status='failed',finished_at=?,error=COALESCE(error,'服务重启，运行已中断') WHERE status='running'", [now]);
   }
   createRun(jobId: number, accountId: number) { return this.insert('INSERT INTO runs(job_id,account_id,status,started_at) VALUES (?,?,?,?)', [jobId, accountId, 'running', this.now()]); }
-  finishRun(id: number, status: string, stats: Record<string, number | string> = {}) { this.run('UPDATE runs SET status=?,discovered_count=?,candidate_count=?,attempted_count=?,success_count=?,participated_count=?,failed_count=?,error_count=?,finished_at=?,error=? WHERE id=?', [status, stats.discovered_count || 0, stats.candidate_count || 0, stats.attempted_count || 0, stats.success_count || 0, stats.participated_count || stats.success_count || 0, stats.failed_count || 0, stats.error_count || 0, this.now(), stats.error || null, id]); }
+  finishRun(id: number, status: string, stats: Record<string, number | string> = {}) { this.run('UPDATE runs SET status=?,discovered_count=?,candidate_count=?,attempted_count=?,success_count=?,participated_count=?,partial_count=?,failed_count=?,error_count=?,finished_at=?,error=? WHERE id=?', [status, stats.discovered_count || 0, stats.candidate_count || 0, stats.attempted_count || 0, stats.success_count || 0, stats.participated_count || stats.success_count || 0, stats.partial_count || 0, stats.failed_count || 0, stats.error_count || 0, this.now(), stats.error || null, id]); }
   listRuns(limit = 50) { return this.rows('SELECT r.*,a.name account_name,a.uid,j.type FROM runs r JOIN accounts a ON a.id=r.account_id JOIN jobs j ON j.id=r.job_id ORDER BY r.id DESC LIMIT ?', [limit]); }
   getRun(id: number) { return this.row('SELECT r.*,a.name account_name,a.uid,j.type,j.requested_at FROM runs r JOIN accounts a ON a.id=r.account_id JOIN jobs j ON j.id=r.job_id WHERE r.id=?', [id]); }
   addLog(runId: number, accountId: number, level: string, context: string, message: string) { const createdAt = this.now(); const id = this.insert('INSERT INTO logs(run_id,account_id,level,context,message,created_at) VALUES (?,?,?,?,?,?)', [runId, accountId, level, context, message, createdAt]); return { id, run_id: runId, account_id: accountId, level, context, message, created_at: createdAt }; }
@@ -159,8 +166,9 @@ export class AppDatabase {
       else { discoveryStatus = 'filtered'; filterReason = input.resultReason || null; }
     }
     if (incomingStatus === 'participated') { discoveryStatus = 'candidate'; participationStatus = 'participated'; participationResult = input.resultReason || '参与操作完成'; participatedAt = now; }
+    if (incomingStatus === 'partial' && participationStatus !== 'participated') { discoveryStatus = 'candidate'; participationStatus = 'partial'; participationResult = input.resultReason || '部分参与操作完成'; participatedAt = now; }
     if (incomingStatus === 'failed' && participationStatus !== 'participated') { discoveryStatus = 'candidate'; participationStatus = 'failed'; participationResult = input.resultReason || '参与失败'; }
-    const legacyStatus = participationStatus === 'participated' ? 'participated' : participationStatus === 'failed' ? 'failed' : discoveryStatus === 'filtered' ? 'filtered' : discoveryStatus === 'candidate' ? 'candidate' : 'discovered';
+    const legacyStatus = participationStatus === 'participated' ? 'participated' : ['partial', 'failed'].includes(participationStatus) ? 'failed' : discoveryStatus === 'filtered' ? 'filtered' : discoveryStatus === 'candidate' ? 'candidate' : 'discovered';
     if (!current) {
       this.run('INSERT INTO lotteries(account_id,dyid,source,author,description,draw_time,official,status,result_reason,url,source_created_at,enrichment_status,created_at,updated_at,discovery_status,participation_status,filter_reason,participation_result,participated_at,last_run_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)', [accountId, input.dyid, input.source || 'runtime', input.author || null, input.description || null, input.drawTime && input.drawTime > 0 ? input.drawTime : null, input.official ? 1 : 0, legacyStatus, input.resultReason || null, input.url || `https://t.bilibili.com/${input.dyid}`, input.sourceCreatedAt || null, input.enrichmentStatus || (input.description ? 'complete' : 'pending'), now, now, discoveryStatus, participationStatus, filterReason, participationResult, participatedAt, input.runId || null]);
     } else {
@@ -168,8 +176,8 @@ export class AppDatabase {
     }
     const row = this.row<any>('SELECT * FROM lotteries WHERE account_id=? AND dyid=?', [accountId, input.dyid]);
     if (input.runId && incomingStatus && row) {
-      const stage = ['participated', 'failed'].includes(incomingStatus) || input.resultReason === '已参与或已转发' ? 'participation' : 'discovery';
-      const eventStatus = stage === 'participation' ? participationStatus : discoveryStatus;
+      const stage = ['participated', 'partial', 'failed'].includes(incomingStatus) || input.resultReason === '已参与或已转发' ? 'participation' : 'discovery';
+      const eventStatus = input.resultReason === '已参与或已转发' ? participationStatus : ['participated', 'partial', 'failed'].includes(incomingStatus) ? incomingStatus : discoveryStatus;
       this.run('INSERT INTO lottery_events(account_id,run_id,lottery_id,dyid,stage,status,reason,created_at) VALUES (?,?,?,?,?,?,?,?)', [accountId, input.runId, row.id, input.dyid, stage, eventStatus, input.resultReason || null, now]);
     }
     return row;
@@ -182,7 +190,7 @@ export class AppDatabase {
     if (query.source) { where.push('l.source=?'); params.push(query.source); }
     if (query.discoveryStatus) { where.push('l.discovery_status=?'); params.push(query.discoveryStatus); }
     if (query.participationStatus) {
-      const allowed = new Set(['not_attempted', 'participated', 'already_participated', 'failed']);
+      const allowed = new Set(['not_attempted', 'participated', 'already_participated', 'partial', 'failed']);
       const statuses = String(query.participationStatus).split(',').map(item => item.trim()).filter(item => allowed.has(item));
       if (statuses.length === 1) { where.push('l.participation_status=?'); params.push(statuses[0]); }
       else if (statuses.length > 1) { where.push(`l.participation_status IN (${statuses.map(() => '?').join(',')})`); params.push(...statuses); }
@@ -196,9 +204,45 @@ export class AppDatabase {
     const countAll = (condition: string) => Number(this.row<any>(`SELECT COUNT(*) count FROM lotteries l WHERE ${condition}`)?.count || 0);
     const participatedConfirmed = countAll("l.participation_status='participated'");
     const participatedBefore = countAll("l.participation_status='already_participated'");
-    return { items, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), stats: { candidate: countAll("l.discovery_status='candidate'"), participated: participatedConfirmed + participatedBefore, participatedConfirmed, participatedBefore, filtered: countAll("l.discovery_status='filtered'"), failed: countAll("l.participation_status='failed'") } };
+    return { items, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), stats: { candidate: countAll("l.discovery_status='candidate'"), participated: participatedConfirmed + participatedBefore, participatedConfirmed, participatedBefore, partial: countAll("l.participation_status='partial'"), filtered: countAll("l.discovery_status='filtered'"), failed: countAll("l.participation_status='failed'") } };
   }
   listLotteryEvents(lotteryId: number) { return this.rows('SELECT e.*,r.status run_status,j.type run_type FROM lottery_events e LEFT JOIN runs r ON r.id=e.run_id LEFT JOIN jobs j ON j.id=r.job_id WHERE e.lottery_id=? ORDER BY e.id DESC LIMIT 100', [lotteryId]); }
+  upsertParticipation(accountId: number, runId: number, input: ParticipationInput) {
+    const lottery = this.row<any>('SELECT * FROM lotteries WHERE account_id=? AND dyid=?', [accountId, input.dyid]) || this.upsertLottery(accountId, { dyid: input.dyid });
+    if (!lottery) throw new Error(`抽奖记录不存在：${input.dyid}`);
+    const allowedOverall = new Set(['success', 'partial', 'failed']);
+    const allowedAction = new Set(['not_required', 'not_attempted', 'success', 'failed']);
+    const action = (value?: ParticipationAction) => ({
+      plannedText: value?.plannedText ?? null,
+      actualText: value?.actualText ?? null,
+      source: value?.source || 'none',
+      status: allowedAction.has(value?.status || '') ? value!.status! : 'not_required',
+      code: Number(value?.code) || 0,
+      reason: value?.reason || null
+    });
+    const comment = action(input.comment); const follow = action(input.follow); const like = action(input.like); const relay = action(input.relay);
+    const overallStatus = allowedOverall.has(input.overallStatus) ? input.overallStatus : 'failed';
+    const now = this.now(); const startedAt = input.startedAt || now; const finishedAt = input.finishedAt || now;
+    this.run(`INSERT INTO participation_records(run_id,account_id,lottery_id,dyid,overall_status,result_code,result_reason,comment_planned_text,comment_text,comment_source,comment_status,comment_code,comment_reason,follow_status,follow_code,follow_reason,like_status,like_code,like_reason,relay_planned_text,relay_text,relay_source,relay_status,relay_code,relay_reason,started_at,finished_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(run_id,lottery_id) DO UPDATE SET overall_status=excluded.overall_status,result_code=excluded.result_code,result_reason=excluded.result_reason,comment_planned_text=excluded.comment_planned_text,comment_text=excluded.comment_text,comment_source=excluded.comment_source,comment_status=excluded.comment_status,comment_code=excluded.comment_code,comment_reason=excluded.comment_reason,follow_status=excluded.follow_status,follow_code=excluded.follow_code,follow_reason=excluded.follow_reason,like_status=excluded.like_status,like_code=excluded.like_code,like_reason=excluded.like_reason,relay_planned_text=excluded.relay_planned_text,relay_text=excluded.relay_text,relay_source=excluded.relay_source,relay_status=excluded.relay_status,relay_code=excluded.relay_code,relay_reason=excluded.relay_reason,started_at=excluded.started_at,finished_at=excluded.finished_at`,
+      [runId, accountId, lottery.id, input.dyid, overallStatus, Number(input.resultCode) || 0, input.resultReason || null, comment.plannedText, comment.actualText, comment.source, comment.status, comment.code, comment.reason, follow.status, follow.code, follow.reason, like.status, like.code, like.reason, relay.plannedText, relay.actualText, relay.source, relay.status, relay.code, relay.reason, startedAt, finishedAt]);
+    return this.row<any>('SELECT * FROM participation_records WHERE run_id=? AND lottery_id=?', [runId, lottery.id]);
+  }
+  private listParticipationRecords(scope: 'run' | 'lottery', id: number, query: ParticipationQuery = {}) {
+    const page = Math.max(1, Number(query.page) || 1); const pageSize = Math.min(100, Math.max(10, Number(query.pageSize) || 25));
+    const scopeColumn = scope === 'run' ? 'p.run_id' : 'p.lottery_id'; const where = [`${scopeColumn}=?`]; const params: any[] = [id];
+    if (query.status && ['success', 'partial', 'failed'].includes(query.status)) { where.push('p.overall_status=?'); params.push(query.status); }
+    if (query.search) {
+      const term = `%${query.search}%`; where.push('(p.dyid LIKE ? OR l.author LIKE ? OR l.description LIKE ? OR p.comment_text LIKE ? OR p.relay_text LIKE ?)'); params.push(term, term, term, term, term);
+    }
+    const clause = `WHERE ${where.join(' AND ')}`; const total = Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id ${clause}`, params)?.count || 0);
+    const items = this.rows(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,a.name account_name,r.status run_status,r.started_at run_started_at,j.type run_type FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id ${clause} ORDER BY p.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+    const summaryParams = [id]; const count = (status?: string) => Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p WHERE ${scopeColumn}=?${status ? ' AND p.overall_status=?' : ''}`, status ? [...summaryParams, status] : summaryParams)?.count || 0);
+    return { items, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), summary: { attempted: count(), success: count('success'), partial: count('partial'), failed: count('failed') } };
+  }
+  listRunParticipations(runId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('run', runId, query); }
+  listLotteryParticipations(lotteryId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('lottery', lotteryId, query); }
   listLotteryBackfillCandidates(limit = 20) { return this.rows<any>("SELECT l.*,a.cookie,a.cookie_status FROM lotteries l JOIN accounts a ON a.id=l.account_id WHERE a.enabled=1 AND a.cookie_status!='invalid' AND l.enrichment_status!='failed' AND (l.description IS NULL OR l.description='' OR l.enrichment_status='pending') ORDER BY l.id LIMIT ?", [limit]); }
   listLotteryDrawTimeCandidates(limit = 500) { return this.rows<any>("SELECT * FROM lotteries WHERE draw_time IS NULL AND official=0 AND description IS NOT NULL AND description!='' ORDER BY id DESC LIMIT ?", [limit]); }
   lotteryBackfillStats() { const total = Number(this.row<any>('SELECT COUNT(*) count FROM lotteries')?.count || 0); const pending = Number(this.row<any>("SELECT COUNT(*) count FROM lotteries WHERE enrichment_status!='failed' AND (description IS NULL OR description='' OR enrichment_status='pending')")?.count || 0); const failed = Number(this.row<any>("SELECT COUNT(*) count FROM lotteries WHERE enrichment_status='failed'")?.count || 0); return { total, pending, failed, complete: Math.max(0, total - pending - failed) }; }

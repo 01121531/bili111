@@ -33,7 +33,7 @@ export class SerialScheduler {
       try {
         const result = await this.engine.run(jobId, runId, account, job.type, this.db.getConfig(account.id));
         const status = result.code === 0 ? 'success' : 'failed';
-        this.db.finishRun(runId, status, { discovered_count: result.discovered, candidate_count: result.candidates, attempted_count: result.attempted, success_count: result.success, participated_count: result.success, failed_count: result.failed, error_count: result.errors });
+        this.db.finishRun(runId, status, { discovered_count: result.discovered, candidate_count: result.candidates, attempted_count: result.attempted, success_count: result.success, participated_count: result.success, partial_count: result.partial, failed_count: result.failed, error_count: result.errors });
         this.db.updateJob(jobId, status, { finishedAt: new Date().toISOString(), error: status === 'failed' ? `退出码 ${result.code}` : undefined });
         this.publish({ type: 'job', payload: this.db.getJob(jobId) });
       } catch (error) {
