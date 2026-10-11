@@ -1,0 +1,25 @@
+[Unit]
+Description=Bili Lottery Web Console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lottery-web
+Group=lottery-web
+WorkingDirectory=/opt/bili-dynamic-lottery
+Environment=NODE_ENV=production
+Environment=PORT=6666
+Environment=HOST=0.0.0.0
+ExecStart=/usr/bin/npm run web:start
+Restart=always
+RestartSec=5
+
+# The web process remains unprivileged. Online updates may elevate only through
+# the sudoers rule for /usr/local/sbin/lottery-web-update.
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

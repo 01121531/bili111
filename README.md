@@ -58,6 +58,20 @@ PORT=6666 ADMIN_PASSWORD=请设置管理员密码 npm run web:start
 
 推荐使用 systemd 运行 `lottery-web.service`，Node 服务监听 `6666`，Nginx 对外代理到 `8080`。生产环境至少设置 `ADMIN_PASSWORD`，并确保 `data/.encryption-key` 只允许服务用户读取。
 
+仓库提供了可直接安装的 systemd 单元：
+
+```bash
+install -o root -g root -m 0644 deploy/lottery-web.service /etc/systemd/system/lottery-web.service
+systemctl daemon-reload
+systemctl enable --now lottery-web.service
+```
+
+服务仍以 `lottery-web` 非 root 用户运行。为了允许网页在线更新，单元必须保持 `NoNewPrivileges=false`；sudoers 只能放行固定更新脚本，不能给服务用户开放任意 sudo 命令：
+
+```text
+lottery-web ALL=(root) NOPASSWD: /usr/local/sbin/lottery-web-update
+```
+
 ### 在线更新
 
 登录控制台后打开“系统更新”，手动检查 `01121531/bili111` 的 `main` 分支，再确认执行更新。更新脚本会备份 `data/lottery.db` 和 `data/.encryption-key`，安装依赖、类型检查、构建前端并重启服务；失败时自动恢复旧 commit 和数据备份。更新源、仓库、分支和命令均由服务器固定配置，网页端不能修改。
