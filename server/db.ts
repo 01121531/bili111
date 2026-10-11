@@ -18,7 +18,15 @@ export class AppDatabase {
   private rows<T = any>(sql: string, params: any[] = []) { const statement = this.db.prepare(sql); statement.bind(params); const result: T[] = []; while (statement.step()) result.push(statement.getAsObject() as T); statement.free(); return result; }
   private row<T = any>(sql: string, params: any[] = []) { return this.rows<T>(sql, params)[0] as T | undefined; }
   private run(sql: string, params: any[] = []) { const statement = this.db.prepare(sql); statement.bind(params); statement.step(); statement.free(); this.flush(); }
-  private insert(sql: string, params: any[] = []) { this.run(sql, params); return Number(this.row<{ id: number }>('SELECT last_insert_rowid() id')!.id); }
+  private insert(sql: string, params: any[] = []) {
+    const statement = this.db.prepare(sql);
+    statement.bind(params);
+    statement.step();
+    statement.free();
+    const id = Number(this.row<{ id: number }>('SELECT last_insert_rowid() id')!.id);
+    this.flush();
+    return id;
+  }
   private migrate() {
     this.db.run(`CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT UNIQUE, name TEXT, note TEXT NOT NULL DEFAULT '', cookie TEXT NOT NULL, cookie_status TEXT NOT NULL DEFAULT 'unknown', enabled INTEGER NOT NULL DEFAULT 1, profile_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account_configs (account_id INTEGER PRIMARY KEY, config_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
