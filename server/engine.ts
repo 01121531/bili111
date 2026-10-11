@@ -18,7 +18,9 @@ export class EngineRunner {
     const cliMode = mode === 'discover' ? 'start' : mode;
     const runtimePath = join(process.cwd(), 'my_config.js');
     const aiConfig = this.ai.resolve(account.id);
-    writeFileSync(runtimePath, `module.exports = ${stringifyRuntimeConfig(runtimeConfig(account.id, config, aiConfig))};\n`, 'utf8');
+    let inheritedConfig: Record<string, unknown> = {};
+    try { inheritedConfig = JSON.parse(this.db.getSetting('global_config') || '{}'); } catch { inheritedConfig = {}; }
+    writeFileSync(runtimePath, `module.exports = ${stringifyRuntimeConfig(runtimeConfig(account.id, config, aiConfig, inheritedConfig))};\n`, 'utf8');
     const aiEnv = {
       AI_API_KEY: aiConfig.apiKey || '',
       ENABLE_AI_JUDGE: aiConfig.apiKey && aiConfig.enableJudge ? '1' : '',

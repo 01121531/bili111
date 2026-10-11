@@ -141,8 +141,14 @@ export function toRuntimeConfig(value: Record<string, unknown>) {
   return result;
 }
 
-export function mergedConfig(override: Record<string, unknown> = {}) {
-  return toRuntimeConfig({ ...clone(defaultConfig), ...clone(override) });
+function businessConfig(value: Record<string, unknown> = {}) {
+  const result = clone(value) as Record<string, unknown>;
+  delete result.ai;
+  return result;
+}
+
+export function mergedConfig(override: Record<string, unknown> = {}, inherited: Record<string, unknown> = {}) {
+  return toRuntimeConfig({ ...clone(defaultConfig), ...businessConfig(inherited), ...businessConfig(override) });
 }
 
 function sanitizeField(field: ConfigField, value: unknown) {
@@ -212,26 +218,39 @@ export function validateWebConfig(input: unknown) {
 }
 
 export function diffFromDefaults(input: unknown) {
+  return diffFromBase(input);
+}
+
+export function diffFromBase(input: unknown, inherited: Record<string, unknown> = {}) {
   const effective = validateWebConfig(input);
-  const defaults = toWebConfig(defaultConfig);
+  const defaults = toWebConfig(mergedConfig({}, inherited));
   const diff: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(effective)) if (!jsonEqual(value, defaults[key])) diff[key] = clone(value);
   return { effective, diff };
 }
 
-export function publicConfigPayload(override: Record<string, unknown> = {}) {
-  const effective = toWebConfig(mergedConfig(override));
-  return { effective, overrides: toWebConfig(override), defaults: toWebConfig(defaultConfig), categories: configCategories, fields: configFields };
+export function publicConfigPayload(override: Record<string, unknown> = {}, inherited: Record<string, unknown> = {}, scope: 'default' | 'account' = 'account') {
+  const businessOverride = businessConfig(override);
+  const effective = toWebConfig(mergedConfig(businessOverride, inherited));
+  return {
+    scope,
+    inherited: scope === 'account' && Object.keys(businessOverride).length === 0,
+    effective,
+    overrides: toWebConfig(businessOverride),
+    defaults: toWebConfig(mergedConfig({}, inherited)),
+    categories: configCategories,
+    fields: configFields
+  };
 }
 
-export function runtimeConfig(accountId: number, override: Record<string, unknown> = {}, ai?: AiConfig) {
-  const accountConfig = mergedConfig(override);
+export function runtimeConfig(accountId: number, override: Record<string, unknown> = {}, ai?: AiConfig, inherited: Record<string, unknown> = {}) {
+  const accountConfig = mergedConfig(override, inherited);
   if (ai) {
     accountConfig.ai_judge_parm = { url: ai.baseUrl, body: { model: ai.model, temperature: ai.temperature, max_tokens: ai.maxTokens }, prompt: ai.judgePrompt };
     accountConfig.ai_comments_parm = { url: ai.baseUrl, body: { model: ai.model, temperature: ai.temperature, max_tokens: ai.maxTokens }, prompt: ai.commentPrompt };
     accountConfig.ai_relay_parm = { url: ai.baseUrl, body: { model: ai.model, temperature: ai.temperature, max_tokens: ai.maxTokens }, prompt: ai.relayPrompt };
   }
-  return { default_config: toRuntimeConfig(defaultConfig), [`config_${accountId}`]: accountConfig };
+  return { default_config: mergedConfig({}, inherited), [`config_${accountId}`]: accountConfig };
 }
 
 export function stringifyRuntimeConfig(value: unknown) {

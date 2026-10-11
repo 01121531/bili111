@@ -48,13 +48,33 @@ const scheduleTasks = [
 const cronOptions = [{ value: '*/30 * * * *', label: '每 30 分钟' }, { value: '0 * * * *', label: '每小时' }, { value: '0 */6 * * *', label: '每 6 小时' }, { value: '0 9 * * *', label: '每天 09:00' }, { value: '0 20 * * *', label: '每天 20:00' }, { value: '0 3 * * 0', label: '每周日 03:00' }];
 
 export function SchedulesPage({ accounts, initialAccountId, onNotify }: AnyObject) {
-  const [accountId, setAccountId] = useState<number | null>(initialAccountId || accounts[0]?.id || null); const [rows, setRows] = useState<AnyObject[]>([]); const [drafts, setDrafts] = useState<AnyObject>({});
-  async function load() { if (!accountId) return; const data = await api<AnyObject[]>(`/api/accounts/${accountId}/schedules`); setRows(data); setDrafts(Object.fromEntries(scheduleTasks.map(task => { const row = data.find(item => item.type === task.type); return [task.type, { cron: row?.cron || task.cron, enabled: Boolean(row?.enabled) }]; }))); }
-  useEffect(() => { void load().catch(error => onNotify(error.message)); }, [accountId]);
-  async function save(type: string) { const item = drafts[type]; try { await api(`/api/accounts/${accountId}/schedules/${type}`, { method: 'PUT', body: JSON.stringify(item) }); onNotify('定时任务已保存'); await load(); } catch (error) { onNotify((error as Error).message); } }
-  return <><PageHeader title="定时任务" description="每个账号独立设置自动抽奖、中奖检测、清理和验证计划。" />
-    <Panel title="选择账号" actions={<select value={accountId || ''} onChange={event => setAccountId(Number(event.target.value) || null)}><option value="">选择账号</option>{accounts.map((account: AnyObject) => <option value={account.id} key={account.id}>{account.name || `账号 ${account.id}`}</option>)}</select>}>
-      {!accountId ? <EmptyState title="请先选择账号" /> : <div className="schedule-grid">{scheduleTasks.map(task => { const draft = drafts[task.type] || { cron: task.cron, enabled: false }; const saved = rows.find(item => item.type === task.type); return <article className="schedule-card" key={task.type}><div><h3>{task.label}</h3><p>{task.description}</p></div><label className="switch-row"><span>启用计划</span><input type="checkbox" checked={draft.enabled} onChange={event => setDrafts((value: AnyObject) => ({ ...value, [task.type]: { ...draft, enabled: event.target.checked } }))} /></label><label>执行频率<select value={draft.cron} onChange={event => setDrafts((value: AnyObject) => ({ ...value, [task.type]: { ...draft, cron: event.target.value } }))}>{cronOptions.map(option => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label><small>下次执行：{formatDate(saved?.next_run_at)}</small><button className="button secondary" onClick={() => save(task.type)}>保存计划</button></article>; })}</div>}
+  const [scope, setScope] = useState<'default' | 'account'>(initialAccountId ? 'account' : 'default'); const [accountId, setAccountId] = useState<number | null>(initialAccountId || accounts[0]?.id || null); const [rows, setRows] = useState<AnyObject[]>([]); const [drafts, setDrafts] = useState<AnyObject>({}); const [busy, setBusy] = useState(false);
+  async function load() {
+    if (scope === 'account' && !accountId) { setRows([]); setDrafts({}); return; }
+    const data = await api<AnyObject[]>(scope === 'default' ? '/api/schedules/defaults' : `/api/accounts/${accountId}/schedules`);
+    setRows(data); setDrafts(Object.fromEntries(scheduleTasks.map(task => { const row = data.find(item => item.type === task.type); return [task.type, { cron: row?.cron || task.cron, enabled: Boolean(row?.enabled) }]; })));
+  }
+  useEffect(() => { void load().catch(error => onNotify(error.message)); }, [scope, accountId]);
+  async function save(type?: string) {
+    setBusy(true);
+    try {
+      if (scope === 'default') {
+        const selected = type ? { [type]: drafts[type] } : Object.fromEntries(scheduleTasks.map(task => [task.type, drafts[task.type]]));
+        await api('/api/schedules/defaults', { method: 'PUT', body: JSON.stringify({ schedules: selected }) });
+        onNotify(type ? '默认定时任务已保存' : '全部默认定时任务已保存');
+      } else if (accountId && type) {
+        await api(`/api/accounts/${accountId}/schedules/${type}`, { method: 'PUT', body: JSON.stringify(drafts[type]) }); onNotify('账号独立计划已保存');
+      }
+      await load();
+    } catch (error) { onNotify((error as Error).message); } finally { setBusy(false); }
+  }
+  async function reset(type: string) { if (!accountId || !window.confirm('确定恢复继承该项默认定时任务吗？')) return; await api(`/api/accounts/${accountId}/schedules/${type}/reset`, { method: 'POST' }); onNotify('已恢复继承默认计划'); await load(); }
+  async function applyToAll() { if (!window.confirm('确定把默认定时任务应用到全部账号吗？现有账号的独立定时设置会被清除。')) return; const result = await api<AnyObject>('/api/schedules/defaults/apply-to-all', { method: 'POST' }); onNotify(`已应用到 ${result.accounts || 0} 个账号`); }
+  return <><PageHeader title="定时任务" description="默认任务适用于新账号和继承账号；单账号可以按需覆盖。" actions={scope === 'default' && <><button className="button secondary" onClick={applyToAll}>应用到全部账号</button><button className="button primary" onClick={() => save()} disabled={busy}>保存全部默认任务</button></>} />
+    <div className="schedule-scope-bar"><div className="segmented scope-segment"><button className={scope === 'default' ? 'active' : ''} onClick={() => setScope('default')}>默认定时任务</button><button className={scope === 'account' ? 'active' : ''} onClick={() => setScope('account')}>单账号任务</button></div>{scope === 'account' && <label>当前账号<select value={accountId || ''} onChange={event => setAccountId(Number(event.target.value) || null)}><option value="">选择账号</option>{accounts.map((account: AnyObject) => <option value={account.id} key={account.id}>{account.name || `账号 ${account.id}`}</option>)}</select></label>}<span className="scope-help">时区：Asia/Shanghai</span></div>
+    {scope === 'default' && <div className="info-banner scope-info"><Clock3 size={18} /><div><strong>新账号自动继承这些计划</strong><p>修改默认值只更新继承账号；独立计划保持不变。</p></div></div>}
+    <Panel title={scope === 'default' ? '默认任务模板' : '账号任务计划'} subtitle={scope === 'default' ? '初始全部关闭，保存后对继承账号生效。' : '修改并保存后，该项会成为账号独立设置。'}>
+      {scope === 'account' && !accountId ? <EmptyState title="请先选择账号" /> : <div className="schedule-grid">{scheduleTasks.map(task => { const draft = drafts[task.type] || { cron: task.cron, enabled: false }; const saved = rows.find(item => item.type === task.type); const inherited = scope === 'default' || Boolean(saved?.inherited); return <article className="schedule-card" key={task.type}><div className="schedule-card-heading"><div><h3>{task.label}</h3><p>{task.description}</p></div><span className={`inheritance-badge ${inherited ? 'inherited' : 'override'}`}>{scope === 'default' ? '默认模板' : inherited ? '继承默认' : '独立设置'}</span></div><label className="switch-row"><span>启用计划</span><input type="checkbox" checked={draft.enabled} onChange={event => setDrafts((value: AnyObject) => ({ ...value, [task.type]: { ...draft, enabled: event.target.checked } }))} /></label><label>执行频率<select value={draft.cron} onChange={event => setDrafts((value: AnyObject) => ({ ...value, [task.type]: { ...draft, cron: event.target.value } }))}>{cronOptions.map(option => <option value={option.value} key={option.value}>{option.label}</option>)}</select></label><small>下次执行：{formatDate(saved?.next_run_at)}</small><div className="schedule-actions"><button className="button secondary" onClick={() => save(task.type)} disabled={busy}>保存计划</button>{scope === 'account' && !inherited && <button className="button ghost" onClick={() => reset(task.type)}>恢复默认</button>}</div></article>; })}</div>}
     </Panel></>;
 }
 

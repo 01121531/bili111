@@ -5,7 +5,8 @@ import { hashPassword } from './security';
 
 export type AccountRow = { id: number; uid: string | null; name: string | null; note: string; cookie: string; cookie_status: string; enabled: number; profile_json: string | null; last_verified_at: string | null; verification_error: string | null; created_at: string; updated_at: string };
 export type JobRow = { id: number; account_id: number; type: string; status: string; requested_at: string; started_at: string | null; finished_at: string | null; error: string | null };
-export type ScheduleRow = { id: number; account_id: number; type: string; cron: string; enabled: number; last_run_at: string | null; next_run_at: string | null; last_job_id: number | null; created_at: string; updated_at: string };
+export type ScheduleRow = { id: number; account_id: number; type: string; cron: string; enabled: number; is_override: number; last_run_at: string | null; next_run_at: string | null; last_job_id: number | null; created_at: string; updated_at: string };
+export type ScheduleSeed = { accountId: number; type: string; cron: string; enabled: boolean; nextRunAt: string | null; isOverride: boolean };
 export type NotificationRow = { id: number; account_id: number | null; run_id: number | null; channel: string; event_type: string; title: string; content: string; status: string; error: string | null; attempts: number; last_attempt_at: string | null; created_at: string };
 export type LotteryInput = { dyid: string; source?: string; author?: string; description?: string; drawTime?: number | null; official?: boolean; status?: string; resultReason?: string; url?: string; sourceCreatedAt?: number | null; enrichmentStatus?: string; runId?: number };
 export type LotteryQuery = { page?: number; pageSize?: number; accountId?: number; source?: string; discoveryStatus?: string; participationStatus?: string; search?: string; from?: string; to?: string };
@@ -68,6 +69,7 @@ export class AppDatabase {
     this.addColumn('runs', 'candidate_count INTEGER NOT NULL DEFAULT 0');
     this.addColumn('runs', 'participated_count INTEGER NOT NULL DEFAULT 0');
     this.addColumn('runs', 'failed_count INTEGER NOT NULL DEFAULT 0');
+    this.addColumn('account_schedules', 'is_override INTEGER NOT NULL DEFAULT 1');
     this.db.run("UPDATE lotteries SET source='legacy' WHERE source IN ('start','discover')");
     this.db.run("UPDATE lotteries SET discovery_status=CASE WHEN status='candidate' THEN 'candidate' WHEN status='filtered' THEN 'filtered' WHEN status IN ('participated','failed') THEN 'candidate' ELSE 'pending' END WHERE discovery_status='pending'");
     this.db.run("UPDATE lotteries SET participation_status='participated',participated_at=COALESCE(participated_at,updated_at,created_at),participation_result=COALESCE(participation_result,result_reason) WHERE status='participated' AND participation_status='not_attempted'");
@@ -100,6 +102,25 @@ export class AppDatabase {
   deleteAccount(id: number) { this.run('DELETE FROM account_schedules WHERE account_id=?', [id]); this.run('DELETE FROM accounts WHERE id=?', [id]); }
   getConfig(id: number) { const row = this.row<{ config_json: string }>('SELECT config_json FROM account_configs WHERE account_id=?', [id]); return row ? JSON.parse(row.config_json) : {}; }
   setConfig(id: number, config: object) { this.run('INSERT INTO account_configs(account_id,config_json,updated_at) VALUES (?,?,?) ON CONFLICT(account_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at', [id, JSON.stringify(config), this.now()]); }
+  resetConfig(id: number) {
+    const current = this.getConfig(id) as Record<string, unknown>;
+    this.setConfig(id, current.ai ? { ai: current.ai } : {});
+    return this.getConfig(id);
+  }
+  resetAllConfigs() {
+    const rows = this.rows<{ account_id: number; config_json: string }>('SELECT account_id,config_json FROM account_configs');
+    this.db.run('BEGIN');
+    try {
+      for (const row of rows) {
+        let current: Record<string, unknown> = {};
+        try { current = JSON.parse(row.config_json); } catch { current = {}; }
+        const next = current.ai ? { ai: current.ai } : {};
+        this.db.run('UPDATE account_configs SET config_json=?,updated_at=? WHERE account_id=?', [JSON.stringify(next), this.now(), row.account_id]);
+      }
+      this.db.run('COMMIT'); this.flush();
+    } catch (error) { this.db.run('ROLLBACK'); throw error; }
+    return rows.length;
+  }
   createJob(accountId: number, type: string) { const id = this.insert('INSERT INTO jobs(account_id,type,requested_at) VALUES (?,?,?)', [accountId, type, this.now()]); return this.getJob(id)!; }
   listJobs(limit = 50) { return this.rows('SELECT j.*,a.name account_name,a.uid FROM jobs j JOIN accounts a ON a.id=j.account_id ORDER BY j.id DESC LIMIT ?', [limit]); }
   getJob(id: number) { return this.row<JobRow>('SELECT * FROM jobs WHERE id=?', [id]); }
@@ -197,11 +218,30 @@ export class AppDatabase {
     return this.rows<ScheduleRow & { account_name: string | null; uid: string | null }>(`SELECT s.*,a.name account_name,a.uid FROM account_schedules s JOIN accounts a ON a.id=s.account_id ${where} ORDER BY s.account_id,s.type`, accountId ? [accountId] : []);
   }
   getSchedule(id: number) { return this.row<ScheduleRow>('SELECT * FROM account_schedules WHERE id=?', [id]); }
-  upsertSchedule(accountId: number, type: string, cron: string, enabled: boolean, nextRunAt: string | null) {
+  upsertSchedule(accountId: number, type: string, cron: string, enabled: boolean, nextRunAt: string | null, isOverride = true) {
     const now = this.now();
-    this.run(`INSERT INTO account_schedules(account_id,type,cron,enabled,next_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)
-      ON CONFLICT(account_id,type) DO UPDATE SET cron=excluded.cron,enabled=excluded.enabled,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at`, [accountId, type, cron, enabled ? 1 : 0, nextRunAt, now, now]);
+    this.run(`INSERT INTO account_schedules(account_id,type,cron,enabled,is_override,next_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)
+      ON CONFLICT(account_id,type) DO UPDATE SET cron=excluded.cron,enabled=excluded.enabled,is_override=excluded.is_override,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at`, [accountId, type, cron, enabled ? 1 : 0, isOverride ? 1 : 0, nextRunAt, now, now]);
     return this.row<ScheduleRow>('SELECT * FROM account_schedules WHERE account_id=? AND type=?', [accountId, type])!;
+  }
+  syncScheduleRows(rows: ScheduleSeed[], mode: 'missing' | 'inherited' | 'all') {
+    const now = this.now(); this.db.run('BEGIN');
+    try {
+      for (const row of rows) {
+        const existing = this.row<ScheduleRow>('SELECT * FROM account_schedules WHERE account_id=? AND type=?', [row.accountId, row.type]);
+        if (!existing) {
+          this.db.run('INSERT INTO account_schedules(account_id,type,cron,enabled,is_override,next_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)', [row.accountId, row.type, row.cron, row.enabled ? 1 : 0, row.isOverride ? 1 : 0, row.nextRunAt, now, now]);
+        } else {
+          const inheritedChanged = mode === 'inherited' && existing.is_override === 0 && (
+            existing.cron !== row.cron || Boolean(existing.enabled) !== row.enabled ||
+            (row.enabled && !existing.next_run_at) || (!row.enabled && existing.next_run_at !== null)
+          );
+          if (mode !== 'all' && !inheritedChanged) continue;
+          this.db.run('UPDATE account_schedules SET cron=?,enabled=?,is_override=?,next_run_at=?,updated_at=? WHERE id=?', [row.cron, row.enabled ? 1 : 0, row.isOverride ? 1 : 0, row.nextRunAt, now, existing.id]);
+        }
+      }
+      this.db.run('COMMIT'); this.flush();
+    } catch (error) { this.db.run('ROLLBACK'); throw error; }
   }
   deleteSchedule(id: number) { this.run('DELETE FROM account_schedules WHERE id=?', [id]); }
   listDueSchedules(now: string) { return this.rows<ScheduleRow>('SELECT * FROM account_schedules WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=? ORDER BY next_run_at,id', [now]); }
