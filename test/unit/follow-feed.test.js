@@ -175,6 +175,13 @@ test('动态详情风控码不会重复切换同一线路', () => {
     assert.equal(shouldSwitch, false);
     assert.equal(value, null);
     assert.match(message, /停止继续请求/);
+
+    const [httpShouldSwitch, httpValue, httpMessage] = bili._getOneDynamicByDyid.pub_handler(
+        '[响应错误]HTTP状态码:412'
+    );
+    assert.equal(httpShouldSwitch, false);
+    assert.equal(httpValue, null);
+    assert.match(httpMessage, /HTTP风控/);
 });
 
 test('专栏触发风控后停止当前专栏并跳过后续专栏来源', async () => {
