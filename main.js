@@ -192,36 +192,48 @@ function initConfig() {
 }
 
 (async function () {
-    log.rainbow(metainfo);
+    try {
+        log.rainbow(metainfo);
 
-    if (initEnv() || initConfig()) return;
+        if (initEnv() || initConfig()) {
+            process.exitCode = 1;
+            return;
+        }
 
-    /**OPTIONS */
-    process.env.lottery_mode = process.argv[2];
+        /**OPTIONS */
+        process.env.lottery_mode = process.argv[2];
 
-    log.info('检查更新', '开始');
+        log.info('检查更新', '开始');
 
-    if (process.env.lottery_mode === 'update') {
-        await require('./lib/update').update(true);
-        return;
-    } else {
-        await require('./lib/update').update(false);
-    }
+        if (process.env.lottery_mode === 'update') {
+            await require('./lib/update').update(true);
+            return;
+        } else {
+            await require('./lib/update').update(false);
+        }
 
-    const err_msg = await main();
-    if (err_msg) {
-        log.error('错误', err_msg);
-        log.warn('结束运行', '5秒后自动退出');
-        await delay(5 * 1000);
-    } else {
+        const err_msg = await main();
+        if (err_msg) {
+            log.error('错误', err_msg);
+            log.warn('结束运行', '5秒后自动退出');
+            await delay(5 * 1000);
+            process.exitCode = 1;
+            return;
+        }
+
         while (loop_wait) {
             log.info('程序休眠', `${loop_wait / 1000}秒后再次启动`);
             await delay(loop_wait);
-            if (initEnv() || initConfig()) return;
-            await main();
+            if (initEnv() || initConfig()) {
+                process.exitCode = 1;
+                return;
+            }
+            const loopError = await main();
+            if (loopError) throw new Error(loopError);
         }
         log.info('结束运行', '未在my_config.js中设置休眠时间');
+    } catch (error) {
+        log.error('致命错误', error && error.stack ? error.stack : String(error));
+        process.exitCode = 1;
     }
-
-    process.exit(0);
 })();
