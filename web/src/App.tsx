@@ -1,13 +1,19 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, AlertTriangle, Bell, Bot, CheckCircle2, ChevronRight, CircleAlert, Clock3, Eye, FileCog, Gift, GitCommitHorizontal, LayoutDashboard, ListTodo, LogOut, Menu, Plus, QrCode, Radar, RefreshCw, Search, Settings2, ShieldCheck, SlidersHorizontal, Trash2, UserRound, X, Zap } from 'lucide-react';
 
 type AnyObject = Record<string, any>;
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
 const api = async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
   const headers = new Headers(init.headers || {});
   if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
   const res = await fetch(path, { credentials: 'include', ...init, headers });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || '请求失败');
+  if (!res.ok) throw new ApiError(data.error || '请求失败', res.status);
   return data;
 };
 const date = (value?: string | number) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -46,10 +52,34 @@ function App() {
   const [authed, setAuthed] = useState<boolean | null>(null); const [page, setPage] = useState('dashboard'); const [mobileNav, setMobileNav] = useState(false);
   const [stats, setStats] = useState<AnyObject>({}); const [accounts, setAccounts] = useState<AnyObject[]>([]); const [jobs, setJobs] = useState<AnyObject[]>([]); const [runs, setRuns] = useState<AnyObject[]>([]); const [lotteries, setLotteries] = useState<AnyObject[]>([]); const [wins, setWins] = useState<AnyObject[]>([]); const [toast, setToast] = useState('');
   const [accountModal, setAccountModal] = useState(false); const [selectedAccount, setSelectedAccount] = useState<AnyObject | null>(null); const [logs, setLogs] = useState<AnyObject[]>([]); const [configAccount, setConfigAccount] = useState<number | null>(null); const [scheduleAccount, setScheduleAccount] = useState<number | null>(null);
+  const loadingRef = useRef(false); const refreshPendingRef = useRef(false);
   const notify = (message: string) => { setToast(message); window.setTimeout(() => setToast(''), 2800); };
-  const load = async () => { try { const [s, a, j, r, l, w] = await Promise.all([api('/api/stats/overview'), api<AnyObject[]>('/api/accounts'), api<AnyObject[]>('/api/jobs'), api<AnyObject[]>('/api/runs'), api<AnyObject[]>('/api/lotteries'), api<AnyObject[]>('/api/wins')]); setStats(s); setAccounts(a); setJobs(j); setRuns(r); setLotteries(l); setWins(w); } catch { setAuthed(false); } };
-  useEffect(() => { api('/api/auth/me').then(() => { setAuthed(true); load(); }).catch(() => setAuthed(false)); }, []);
-  useEffect(() => { if (!authed) return; const stream = new EventSource('/api/logs/stream'); stream.onmessage = () => { load(); }; return () => stream.close(); }, [authed]);
+  const load = useCallback(async () => {
+    if (loadingRef.current) { refreshPendingRef.current = true; return; }
+    loadingRef.current = true;
+    try {
+      do {
+        refreshPendingRef.current = false;
+        const [s, a, j, r, l, w] = await Promise.all([api('/api/stats/overview'), api<AnyObject[]>('/api/accounts'), api<AnyObject[]>('/api/jobs'), api<AnyObject[]>('/api/runs'), api<AnyObject[]>('/api/lotteries'), api<AnyObject[]>('/api/wins')]);
+        setStats(s); setAccounts(a); setJobs(j); setRuns(r); setLotteries(l); setWins(w);
+      } while (refreshPendingRef.current);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) setAuthed(false);
+    } finally {
+      loadingRef.current = false;
+    }
+  }, []);
+  useEffect(() => { api('/api/auth/me').then(() => { setAuthed(true); void load(); }).catch(() => setAuthed(false)); }, [load]);
+  useEffect(() => {
+    if (!authed) return;
+    const stream = new EventSource('/api/logs/stream');
+    let refreshTimer: number | undefined;
+    stream.onmessage = () => {
+      if (refreshTimer !== undefined) return;
+      refreshTimer = window.setTimeout(() => { refreshTimer = undefined; void load(); }, 1000);
+    };
+    return () => { stream.close(); if (refreshTimer !== undefined) window.clearTimeout(refreshTimer); };
+  }, [authed, load]);
   if (authed === null) return <div className="loading-screen"><RefreshCw className="spin" />正在连接控制台…</div>;
   if (!authed) return <Login onLogin={() => { setAuthed(true); load(); }} />;
   const active = nav.find(item => item.id === page) || nav[0];
