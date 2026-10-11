@@ -19,6 +19,25 @@ exec >>"$LOG_FILE" 2>&1
 
 log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
+fetch_origin() {
+  local attempt=1
+  while [ "$attempt" -le 3 ]; do
+    if timeout 180 git -C "$APP_DIR" -c http.version=HTTP/1.1 -c http.lowSpeedLimit=128 -c http.lowSpeedTime=60 fetch origin "$BRANCH"; then
+      return 0
+    fi
+    log "git fetch 第${attempt}次失败"
+    attempt=$((attempt + 1))
+    [ "$attempt" -le 3 ] && sleep 5
+  done
+  return 1
+}
+
+github_curl() {
+  curl --fail --silent --show-error --location \
+    --connect-timeout 10 --max-time "$1" \
+    --retry 2 --retry-delay 3 --retry-all-errors "${@:2}"
+}
+
 wait_for_url() {
   local url="$1"
   local attempts=30
@@ -78,7 +97,7 @@ write_state running "" false
 cp -f "$DATA_DIR/lottery.db" "$BACKUP_DIR/lottery.db" 2>/dev/null || true
 cp -f "$DATA_DIR/.encryption-key" "$BACKUP_DIR/.encryption-key" 2>/dev/null || true
 
-if git -C "$APP_DIR" fetch origin "$BRANCH"; then
+if fetch_origin; then
   NEW_COMMIT="$(git -C "$APP_DIR" rev-parse "origin/$BRANCH")"
   if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "已经是最新版本" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
   git -C "$APP_DIR" reset --hard "$NEW_COMMIT" || rollback "切换到新版本失败"
@@ -86,9 +105,9 @@ else
   log "git fetch 不可用，使用固定仓库 codeload 快照"
   TMP_DIR="$(mktemp -d)"
   trap 'rm -rf "$TMP_DIR"' EXIT
-  NEW_COMMIT="$(curl -fsSL --max-time 60 "https://api.github.com/repos/$REPO/commits/$BRANCH" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).sha));')" || rollback "获取 GitHub commit 失败"
+  NEW_COMMIT="$(github_curl 60 "https://api.github.com/repos/$REPO/commits/$BRANCH" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).sha));')" || rollback "获取 GitHub commit 失败"
   if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "已经是最新版本" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
-  curl -fsSL --max-time 180 "https://codeload.github.com/$REPO/tar.gz/$NEW_COMMIT" -o "$TMP_DIR/source.tar.gz" || rollback "下载 GitHub 源码失败"
+  github_curl 600 "https://codeload.github.com/$REPO/tar.gz/$NEW_COMMIT" -o "$TMP_DIR/source.tar.gz" || rollback "下载 GitHub 源码失败"
   tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR" || rollback "解压 GitHub 源码失败"
   SOURCE_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
   [ -n "$SOURCE_DIR" ] || rollback "GitHub 源码目录为空"
