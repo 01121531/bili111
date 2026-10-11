@@ -61,10 +61,15 @@ app.get('/api/logs/stream', { preHandler: auth }, async (request, reply) => {
   reply.hijack();
   reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
   reply.raw.write(': connected\n\n');
-  const handler = (event: object) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-  const heartbeat = setInterval(() => reply.raw.write(': heartbeat\n\n'), 25000);
+  const cleanup = () => { clearInterval(heartbeat); scheduler.events.off('event', handler); };
+  const write = (value: string) => {
+    if (reply.raw.destroyed || reply.raw.writableEnded) { cleanup(); return; }
+    try { reply.raw.write(value); } catch { cleanup(); }
+  };
+  const handler = (event: object) => write(`data: ${JSON.stringify(event)}\n\n`);
+  const heartbeat = setInterval(() => write(': heartbeat\n\n'), 25000);
   scheduler.events.on('event', handler);
-  request.raw.on('close', () => { clearInterval(heartbeat); scheduler.events.off('event', handler); });
+  request.raw.on('close', cleanup);
 });
 app.get('/api/lotteries', { preHandler: auth }, async () => db.listLotteries());
 app.get('/api/wins', { preHandler: auth }, async () => db.listWins());

@@ -46,6 +46,11 @@ export class AppDatabase {
   listJobs(limit = 50) { return this.rows('SELECT j.*,a.name account_name,a.uid FROM jobs j JOIN accounts a ON a.id=j.account_id ORDER BY j.id DESC LIMIT ?', [limit]); }
   getJob(id: number) { return this.row<JobRow>('SELECT * FROM jobs WHERE id=?', [id]); }
   updateJob(id: number, status: string, fields: { startedAt?: string; finishedAt?: string; error?: string } = {}) { this.run('UPDATE jobs SET status=?,started_at=COALESCE(?,started_at),finished_at=COALESCE(?,finished_at),error=COALESCE(?,error) WHERE id=?', [status, fields.startedAt || null, fields.finishedAt || null, fields.error || null, id]); return this.getJob(id); }
+  recoverInterruptedJobs() {
+    const now = this.now();
+    this.run("UPDATE jobs SET status='failed',finished_at=?,error=COALESCE(error,'服务重启，任务已中断') WHERE status IN ('pending','running')", [now]);
+    this.run("UPDATE runs SET status='failed',finished_at=?,error=COALESCE(error,'服务重启，运行已中断') WHERE status='running'", [now]);
+  }
   createRun(jobId: number, accountId: number) { return this.insert('INSERT INTO runs(job_id,account_id,status,started_at) VALUES (?,?,?,?)', [jobId, accountId, 'running', this.now()]); }
   finishRun(id: number, status: string, stats: Record<string, number | string> = {}) { this.run('UPDATE runs SET status=?,discovered_count=?,attempted_count=?,success_count=?,error_count=?,finished_at=?,error=? WHERE id=?', [status, stats.discovered_count || 0, stats.attempted_count || 0, stats.success_count || 0, stats.error_count || 0, this.now(), stats.error || null, id]); }
   listRuns(limit = 50) { return this.rows('SELECT r.*,a.name account_name,a.uid,j.type FROM runs r JOIN accounts a ON a.id=r.account_id JOIN jobs j ON j.id=r.job_id ORDER BY r.id DESC LIMIT ?', [limit]); }
