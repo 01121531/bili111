@@ -5,7 +5,9 @@ import { getDynamicDetail, getLotteryDrawTime } from './bili';
 const BATCH_SIZE = 20;
 
 export function parseDrawTime(text: string, sourceCreatedAt?: number | null) {
-  const match = String(text || '').match(/(?:开奖(?:时间)?|截至|截止)[^\d]{0,10}(?:(\d{4})[年./-])?(\d{1,2})[月./-](\d{1,2})日?(?:\s*(\d{1,2})(?:[:点时](\d{1,2})?)?)?/i);
+  const value = String(text || '');
+  const match = value.match(/(?:开奖(?:时间)?|截至|截止)[^\d]{0,10}(?:(\d{4})[年./-])?(\d{1,2})[月./-](\d{1,2})日?(?:\s*(\d{1,2})(?:[:点时](\d{1,2})?)?)?/i)
+    || value.match(/(?:(\d{4})[年./-])?(\d{1,2})[月./-](\d{1,2})日?(?:\s*(\d{1,2})(?:[:点时](\d{1,2})?)?)?[^，。\n]{0,10}(?:开奖|开抽|抽(?:取|出|一|送)?)/i);
   if (!match) return null;
   const source = sourceCreatedAt ? new Date(sourceCreatedAt * 1000) : new Date();
   let year = Number(match[1] || source.getFullYear());
@@ -29,7 +31,15 @@ export class LotteryEnricher {
   status() { return { ...this.db.lotteryBackfillStats(), running: this.running, pausedUntil: this.pausedUntil || null, lastError: this.lastError || null }; }
 
   start() {
+    this.reparseKnownDrawTimes();
     this.timer = setTimeout(() => void this.runBatch(), 10000);
+  }
+
+  private reparseKnownDrawTimes() {
+    for (const row of this.db.listLotteryDrawTimeCandidates()) {
+      const drawTime = parseDrawTime(row.description, row.source_created_at);
+      if (drawTime) this.db.upsertLottery(row.account_id, { dyid: String(row.dyid), drawTime });
+    }
   }
 
   stop() { if (this.timer) clearTimeout(this.timer); }

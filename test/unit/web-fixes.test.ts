@@ -81,6 +81,7 @@ test('历史补全按批次读取详情并解析非官方开奖时间', async ()
 
 test('文本开奖时间只解析带明确开奖或截止语义的日期', () => {
   assert.ok(parseDrawTime('开奖时间：2026年10月20日 20:30', 1791656548));
+  assert.ok(parseDrawTime('转评赞本动态，10月30日抽一位幸运用户送礼物', 1791656548));
   assert.equal(parseDrawTime('活动发布于10月20日，欢迎参加', 1791656548), null);
   assert.equal(parseDrawTime('开奖时间：13月40日', 1791656548), null);
 });
