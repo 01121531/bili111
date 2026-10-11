@@ -103,7 +103,38 @@ test('演练模式不写入 dyid，真实模式仍正常写入', async () => {
 
 test('默认配置优先扫描 5 页关注流且不再包含无效文件 API', () => {
     assert.deepEqual(config.FollowFeed, [5]);
+    assert.deepEqual(config.ArticleUIDs, []);
     assert.deepEqual(config.APIs, []);
     assert.deepEqual(config.TxT, []);
     assert.equal(config.LotteryOrder[0], 5);
+    assert.equal(config.LotteryOrder[1], 6);
+});
+
+test('合集账号来源按 UID 获取专栏并使用独立来源标记', async () => {
+    const originalGetArticlesByUID = bili.getArticlesByUID;
+    const searcher = new Searcher();
+    let requested;
+    let normalized;
+    bili.getArticlesByUID = async (uid, limit) => {
+        requested = { uid, limit };
+        return [{ id: 53378913, pub_time: 1791656548 }];
+    };
+    searcher.getLotteryInfoFromArticles = async (articles, type) => {
+        normalized = { articles, type };
+        return [];
+    };
+
+    try {
+        const result = await searcher.getLotteryInfoByArticleUID('100680137');
+        assert.equal(requested.uid, '100680137');
+        assert.ok(requested.limit > 0);
+        assert.deepEqual(result, []);
+        assert.deepEqual(normalized, {
+            articles: [{ id: 53378913, pub_time: 1791656548 }],
+            type: 'article_uid'
+        });
+        assert.equal(new Monitor(['ArticleUIDs', '100680137']).LotteryInfoMap.has('ArticleUIDs'), true);
+    } finally {
+        bili.getArticlesByUID = originalGetArticlesByUID;
+    }
 });

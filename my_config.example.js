@@ -21,6 +21,11 @@ module.exports = Object.freeze({
         Articles: [],
 
         /**
+         * 抽奖合集账号 UID，读取其最新专栏中的动态链接
+         */
+        ArticleUIDs: [],
+
+        /**
          * 扫描当前账号关注动态流的页数，范围 1-20
          */
         FollowFeed: [5],
@@ -69,11 +74,13 @@ module.exports = Object.freeze({
          * * 2 - Articles
          * * 3 - APIs
          * * 4 - TxT
+         * * 5 - FollowFeed
+         * * 6 - ArticleUIDs
          * @example
          * [3,2,1,0]
          * [1,2,1,2,1]
          */
-        LotteryOrder: [5, 3, 2, 0, 1, 4],
+        LotteryOrder: [5, 6, 3, 2, 0, 1, 4],
 
         /**
          * 保存抽奖信息至文件
