@@ -21,9 +21,9 @@ test('关注列表致命错误会拒绝抽奖任务', async () => {
     }
 });
 
-test('没有抽奖信息仍然正常结束', async () => {
+test('没有配置任何抽奖来源会明确失败', async () => {
     process.env.NUMBER = '1';
     globalVar.set('Lottery', []);
-    await assert.doesNotReject(start('1'));
+    await assert.rejects(start('1'), /未配置任何抽奖来源/);
     eventBus.flush();
 });

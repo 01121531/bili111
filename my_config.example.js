@@ -21,6 +21,11 @@ module.exports = Object.freeze({
         Articles: [],
 
         /**
+         * 扫描当前账号关注动态流的页数，范围 1-20
+         */
+        FollowFeed: [5],
+
+        /**
          * @typedef {object} LotteryInfo
          * @property {string} lottery_info_type
          * @property {number} create_time
@@ -49,13 +54,13 @@ module.exports = Object.freeze({
          * @example
          * ["file://lottery_info_1.json"]
          */
-        APIs: ['file://lottery_info_1.json'],
+        APIs: [],
 
         /**
          * lottery_dyids目录下抽奖动态文件名(如dyids.txt)
          * 一行一个dyids(非数字字符分割即可)
          */
-        TxT: ['dyids.txt'],
+        TxT: [],
 
         /**
          * 抽奖参与顺序组合
@@ -68,7 +73,7 @@ module.exports = Object.freeze({
          * [3,2,1,0]
          * [1,2,1,2,1]
          */
-        LotteryOrder: [2, 0, 1, 3],
+        LotteryOrder: [5, 3, 2, 0, 1, 4],
 
         /**
          * 保存抽奖信息至文件

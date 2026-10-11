@@ -13,6 +13,7 @@ export class EngineRunner {
   constructor(private db: AppDatabase, private emit: (event: object) => void, private ai: AiService) {}
 
   run(jobId: number, runId: number, account: AccountRow, mode: string, config: Record<string, unknown>): Promise<EngineResult> {
+    const cliMode = mode === 'discover' ? 'start' : mode;
     const runtimePath = join(process.cwd(), 'my_config.js');
     const aiConfig = this.ai.resolve(account.id);
     writeFileSync(runtimePath, `module.exports = ${JSON.stringify(runtimeConfig(account.id, config, aiConfig), null, 2)};\n`, 'utf8');
@@ -28,9 +29,16 @@ export class EngineRunner {
       AI_SENSITIVE_WORDS: JSON.stringify(aiConfig.sensitiveWords),
       NOTE: account.note || ''
     };
-    const child = spawn(process.execPath, [join(process.cwd(), 'main.js'), mode], {
+    const child = spawn(process.execPath, [join(process.cwd(), 'main.js'), cliMode], {
       cwd: process.cwd(),
-      env: { ...process.env, COOKIE: decrypt(account.cookie), NUMBER: String(account.id), LOTTERY_LOG_LEVEL: '3', ...aiEnv },
+      env: {
+        ...process.env,
+        COOKIE: decrypt(account.cookie),
+        NUMBER: String(account.id),
+        LOTTERY_LOG_LEVEL: '3',
+        NOT_GO_LOTTERY: mode === 'discover' ? '1' : '',
+        ...aiEnv
+      },
       stdio: ['ignore', 'pipe', 'pipe']
     });
     this.processes.set(jobId, child);
@@ -42,7 +50,7 @@ export class EngineRunner {
         if (/抽奖信息|动态/.test(safe)) discovered += /动态/.test(safe) ? 1 : 0;
         if (/成功/.test(safe)) success += 1;
         if (/失败|Error|错误/.test(safe)) errors += 1;
-        if (/转发|评论|点赞|关注|预约/.test(safe)) attempted += 1;
+        if (mode !== 'discover' && /转发|评论|点赞|关注|预约/.test(safe)) attempted += 1;
         const context = safe.match(/\[帐号\d+ ([^\]]+)/)?.[1] || 'engine';
         const log = this.db.addLog(runId, account.id, level, context, safe);
         this.emit({ type: 'log', payload: log });

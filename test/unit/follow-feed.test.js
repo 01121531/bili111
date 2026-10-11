@@ -1,0 +1,109 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const bili = require('../../lib/net/bili');
+const utils = require('../../lib/utils');
+const dStorage = require('../../lib/helper/d_storage');
+const config = require('../../my_config.example.js').default_config;
+const { Searcher } = require('../../lib/core/searcher');
+const { Monitor } = require('../../lib/core/monitor');
+
+function directItem(id, uid, description) {
+    return {
+        id_str: String(id),
+        type: 'DYNAMIC_TYPE_WORD',
+        basic: { comment_id_str: `rid-${id}` },
+        modules: {
+            module_author: { mid: uid, name: `UP-${uid}`, pub_ts: 1700000000 },
+            module_stat: { like: { status: false } },
+            module_dynamic: {
+                desc: { rich_text_nodes: [{ type: 'RICH_TEXT_NODE_TYPE_TEXT', text: description, orig_text: description }] }
+            }
+        }
+    };
+}
+
+function forwardItem(id, uid, original) {
+    const item = directItem(id, uid, '转发动态');
+    item.type = 'DYNAMIC_TYPE_FORWARD';
+    item.orig = original;
+    return item;
+}
+
+test('关注动态流分页、保留末页、解包转发并按动态 ID 去重', async () => {
+    const originalGetFollowFeed = bili.getFollowFeed;
+    const originalDelay = utils.delay;
+    const calls = [];
+    bili.getFollowFeed = async offset => {
+        calls.push(offset);
+        if (!offset) return JSON.stringify({
+            code: 0,
+            data: {
+                has_more: true,
+                offset: 'page-2',
+                items: [
+                    directItem('100000001', 101, '抽奖 转发参与'),
+                    forwardItem('900000001', 999, directItem('200000002', 202, '福利 关注参与'))
+                ]
+            }
+        });
+        return JSON.stringify({
+            code: 0,
+            data: {
+                has_more: false,
+                offset: 'page-3',
+                items: [
+                    directItem('100000001', 101, '重复动态'),
+                    directItem('300000003', 303, '抽奖 评论参与')
+                ]
+            }
+        });
+    };
+    utils.delay = async () => {};
+
+    try {
+        const result = await new Searcher().getLotteryInfoByFollowFeed(5);
+        assert.deepEqual(calls, ['', 'page-2']);
+        assert.deepEqual(result.map(item => item.dyid), ['100000001', '200000002', '300000003']);
+        assert.equal(result[1].uname, 'UP-202');
+        assert.deepEqual(result[1].uids, [202, 0]);
+        assert.equal(result[1].type, 4);
+    } finally {
+        bili.getFollowFeed = originalGetFollowFeed;
+        utils.delay = originalDelay;
+    }
+});
+
+test('关注动态流接口异常会标记来源失败', async () => {
+    const originalGetFollowFeed = bili.getFollowFeed;
+    bili.getFollowFeed = async () => JSON.stringify({ code: -412, message: 'request blocked' });
+    try {
+        assert.equal(await new Searcher().getLotteryInfoByFollowFeed(1), null);
+    } finally {
+        bili.getFollowFeed = originalGetFollowFeed;
+    }
+});
+
+test('演练模式不写入 dyid，真实模式仍正常写入', async () => {
+    const originalUpdate = dStorage.updateDyid;
+    let writes = 0;
+    dStorage.updateDyid = async () => { writes += 1; };
+    try {
+        process.env.NOT_GO_LOTTERY = '1';
+        await new Monitor(['FollowFeed', 1]).markProcessed('100');
+        assert.equal(writes, 0);
+
+        delete process.env.NOT_GO_LOTTERY;
+        await new Monitor(['FollowFeed', 1]).markProcessed('100');
+        assert.equal(writes, 1);
+    } finally {
+        delete process.env.NOT_GO_LOTTERY;
+        dStorage.updateDyid = originalUpdate;
+    }
+});
+
+test('默认配置优先扫描 5 页关注流且不再包含无效文件 API', () => {
+    assert.deepEqual(config.FollowFeed, [5]);
+    assert.deepEqual(config.APIs, []);
+    assert.deepEqual(config.TxT, []);
+    assert.equal(config.LotteryOrder[0], 5);
+});
