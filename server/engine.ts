@@ -39,6 +39,7 @@ export class EngineRunner {
         ...process.env,
         COOKIE: decrypt(account.cookie),
         NUMBER: String(account.id),
+        LOTTERY_ACCOUNT_SCOPE: String(account.id),
         LOTTERY_LOG_LEVEL: '3',
         NOT_GO_LOTTERY: mode === 'discover' ? '1' : '',
         WEB_MANAGED_NOTIFICATIONS: '1',
@@ -60,7 +61,7 @@ export class EngineRunner {
             const drawTime = Number(event.lottery.drawTime || 0) || parseDrawTime(description, sourceCreatedAt);
             discoveredIds.add(dyid);
             const lotteryStatus = String(event.lottery.status || '');
-            if (['candidate', 'participated', 'partial', 'failed'].includes(lotteryStatus) || event.lottery.resultReason === '已参与或已转发') candidateIds.add(dyid);
+            if (['candidate', 'participated', 'partial', 'failed'].includes(lotteryStatus) || ['已参与或已转发', '当前账号已参与或已转发'].includes(String(event.lottery.resultReason || ''))) candidateIds.add(dyid);
             if (['participated', 'partial', 'failed'].includes(lotteryStatus)) attemptedIds.add(dyid);
             if (lotteryStatus === 'participated') { participatedIds.add(dyid); failedIds.delete(dyid); }
             if (lotteryStatus === 'partial' && !participatedIds.has(dyid)) { partialIds.add(dyid); failedIds.delete(dyid); }

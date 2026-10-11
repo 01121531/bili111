@@ -184,6 +184,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
 .status-pill { width: fit-content; min-height: 26px; padding: 3px 9px; display: inline-flex; align-items: center; gap: 6px; border-radius: 13px; background: var(--surface-subtle); color: var(--text-muted); font-size: .8rem; font-weight: 700; white-space: nowrap; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .status-valid, .status-success, .status-participated { color: var(--success); background: var(--success-soft); }
+.multi-account-mark { display: inline-flex; align-items: center; margin-left: 8px; padding: 2px 7px; border-radius: 6px; color: var(--info); background: var(--info-soft); font-size: 12px; }
 .status-invalid, .status-failed { color: var(--danger); background: var(--danger-soft); }
 .status-pending, .status-running, .status-candidate, .status-partial { color: var(--warning); background: var(--warning-soft); }
 .status-not_required, .status-not_attempted { color: var(--text-muted); background: var(--surface-subtle); }

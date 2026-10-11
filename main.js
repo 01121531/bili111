@@ -34,7 +34,7 @@ let ck_flag = 0;
  * @returns {Promise<string>} 错误信息
  */
 async function main() {
-    const { COOKIE, NUMBER, CLEAR, ENABLE_MULTIPLE_ACCOUNT, MULTIPLE_ACCOUNT_PARM } = process.env;
+    const { COOKIE, NUMBER, CLEAR, ENABLE_MULTIPLE_ACCOUNT, MULTIPLE_ACCOUNT_PARM, LOTTERY_ACCOUNT_SCOPE } = process.env;
     if (ENABLE_MULTIPLE_ACCOUNT) {
         let muti_acco = multiple_account.length
             ? multiple_account
@@ -46,6 +46,7 @@ async function main() {
         for (const acco of muti_acco) {
             process.env.COOKIE = acco.COOKIE;
             process.env.NUMBER = acco.NUMBER;
+            process.env.LOTTERY_ACCOUNT_SCOPE = String(acco.NUMBER);
             process.env.CLEAR = acco.CLEAR;
             process.env.NOTE = acco.NOTE;
             process.env.ACCOUNT_UA = acco.ACCOUNT_UA;
@@ -76,6 +77,8 @@ async function main() {
         }
         /**多账号状态还原 */
         process.env.ENABLE_MULTIPLE_ACCOUNT = ENABLE_MULTIPLE_ACCOUNT;
+        if (LOTTERY_ACCOUNT_SCOPE === undefined) delete process.env.LOTTERY_ACCOUNT_SCOPE;
+        else process.env.LOTTERY_ACCOUNT_SCOPE = LOTTERY_ACCOUNT_SCOPE;
     } else if (COOKIE) {
         const global_var = require('./lib/data/global_var');
         await global_var.init(COOKIE, NUMBER);

@@ -201,8 +201,39 @@ test('参与明细按账号和运行隔离并保存实际评论与转发文案',
     assert.equal(firstPage.total, 1); assert.equal(firstPage.summary.success, 1); assert.equal(firstPage.summary.partial, 0);
     assert.equal(firstPage.items[0].comment_text, '最终评论'); assert.equal(firstPage.items[0].relay_text, ''); assert.equal(firstPage.items[0].relay_source, 'empty');
     const lotteryHistory: any = item.db.listLotteryParticipations(lottery.id);
-    assert.equal(lotteryHistory.total, 1); assert.equal(lotteryHistory.items[0].account_name, '账号一');
+    assert.equal(lotteryHistory.total, 2); assert.deepEqual(new Set(lotteryHistory.items.map((row: any) => row.account_name)), new Set(['账号一', '账号二']));
     const secondPage: any = item.db.listRunParticipations(secondRun);
     assert.equal(secondPage.summary.failed, 1); assert.equal(secondPage.items[0].comment_text, '失败评论');
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});
+
+test('同一动态允许不同账号分别参与且详情汇总全部账号', async () => {
+  const item = await databaseFixture();
+  try {
+    const first = item.db.createAccount({ uid: '801', name: '账号一', cookie: encrypt('DedeUserID=801') })!;
+    const second = item.db.createAccount({ uid: '802', name: '账号二', cookie: encrypt('DedeUserID=802') })!;
+    const firstRun = item.db.createRun(item.db.createJob(first.id, 'start').id, first.id);
+    const secondRun = item.db.createRun(item.db.createJob(second.id, 'start').id, second.id);
+    const dyid = '500000001';
+    const firstLottery: any = item.db.upsertLottery(first.id, { dyid, author: '同一作者', status: 'candidate', runId: firstRun });
+    item.db.upsertParticipation(first.id, firstRun, { dyid, overallStatus: 'success', resultReason: '账号一参与成功' });
+    item.db.upsertLottery(first.id, { dyid, status: 'participated', resultReason: '账号一参与成功', runId: firstRun });
+    const secondLottery: any = item.db.upsertLottery(second.id, { dyid, author: '同一作者', status: 'candidate', runId: secondRun });
+    item.db.upsertParticipation(second.id, secondRun, { dyid, overallStatus: 'success', resultReason: '账号二参与成功' });
+    item.db.upsertLottery(second.id, { dyid, status: 'participated', resultReason: '账号二参与成功', runId: secondRun });
+
+    assert.notEqual(firstLottery.id, secondLottery.id);
+    const firstRow: any = item.db.listLotteries({ accountId: first.id, page: 1, pageSize: 10 }).items.find((row: any) => row.dyid === dyid);
+    const secondRow: any = item.db.listLotteries({ accountId: second.id, page: 1, pageSize: 10 }).items.find((row: any) => row.dyid === dyid);
+    assert.equal(firstRow.participation_status, 'participated');
+    assert.equal(secondRow.participation_status, 'participated');
+    assert.equal(Number(firstRow.participation_account_count), 2);
+    const history: any = item.db.listLotteryParticipations(firstLottery.id);
+    assert.equal(history.total, 2);
+    assert.deepEqual(new Set(history.items.map((row: any) => row.account_name)), new Set(['账号一', '账号二']));
+    const events: any[] = item.db.listLotteryEvents(firstLottery.id);
+    assert.equal(events.length, 4);
+    assert.equal(events.filter(event => event.stage === 'participation').length, 2);
+    assert.deepEqual(new Set(events.filter(event => event.stage === 'participation').map(event => event.account_name)), new Set(['账号一', '账号二']));
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });

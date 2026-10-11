@@ -162,7 +162,7 @@ export class AppDatabase {
     if (incomingStatus === 'discovered') discoveryStatus = 'pending';
     if (incomingStatus === 'candidate') { discoveryStatus = 'candidate'; filterReason = null; }
     if (incomingStatus === 'filtered') {
-      if (input.resultReason === '已参与或已转发') { discoveryStatus = 'candidate'; if (participationStatus !== 'participated') participationStatus = 'already_participated'; participationResult = input.resultReason; }
+      if (['已参与或已转发', '当前账号已参与或已转发'].includes(input.resultReason || '')) { discoveryStatus = 'candidate'; if (participationStatus !== 'participated') participationStatus = 'already_participated'; participationResult = input.resultReason; }
       else { discoveryStatus = 'filtered'; filterReason = input.resultReason || null; }
     }
     if (incomingStatus === 'participated') { discoveryStatus = 'candidate'; participationStatus = 'participated'; participationResult = input.resultReason || '参与操作完成'; participatedAt = now; }
@@ -176,8 +176,9 @@ export class AppDatabase {
     }
     const row = this.row<any>('SELECT * FROM lotteries WHERE account_id=? AND dyid=?', [accountId, input.dyid]);
     if (input.runId && incomingStatus && row) {
-      const stage = ['participated', 'partial', 'failed'].includes(incomingStatus) || input.resultReason === '已参与或已转发' ? 'participation' : 'discovery';
-      const eventStatus = input.resultReason === '已参与或已转发' ? participationStatus : ['participated', 'partial', 'failed'].includes(incomingStatus) ? incomingStatus : discoveryStatus;
+      const wasAlreadyParticipated = ['已参与或已转发', '当前账号已参与或已转发'].includes(input.resultReason || '');
+      const stage = ['participated', 'partial', 'failed'].includes(incomingStatus) || wasAlreadyParticipated ? 'participation' : 'discovery';
+      const eventStatus = wasAlreadyParticipated ? participationStatus : ['participated', 'partial', 'failed'].includes(incomingStatus) ? incomingStatus : discoveryStatus;
       this.run('INSERT INTO lottery_events(account_id,run_id,lottery_id,dyid,stage,status,reason,created_at) VALUES (?,?,?,?,?,?,?,?)', [accountId, input.runId, row.id, input.dyid, stage, eventStatus, input.resultReason || null, now]);
     }
     return row;
@@ -200,13 +201,19 @@ export class AppDatabase {
     if (query.search) { where.push('(l.dyid LIKE ? OR l.author LIKE ? OR l.description LIKE ? OR l.result_reason LIKE ?)'); const term = `%${query.search}%`; params.push(term, term, term, term); }
     const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
     const total = Number(this.row<any>(`SELECT COUNT(*) count FROM lotteries l ${clause}`, params)?.count || 0);
-    const items = this.rows(`SELECT l.*,a.name account_name FROM lotteries l JOIN accounts a ON a.id=l.account_id ${clause} ORDER BY l.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+    const items = this.rows(`SELECT l.*,a.name account_name,
+      (SELECT COUNT(DISTINCT p.account_id) FROM participation_records p WHERE p.dyid=l.dyid) participation_account_count
+      FROM lotteries l JOIN accounts a ON a.id=l.account_id ${clause} ORDER BY l.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
     const countAll = (condition: string) => Number(this.row<any>(`SELECT COUNT(*) count FROM lotteries l WHERE ${condition}`)?.count || 0);
     const participatedConfirmed = countAll("l.participation_status='participated'");
     const participatedBefore = countAll("l.participation_status='already_participated'");
     return { items, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), stats: { candidate: countAll("l.discovery_status='candidate'"), participated: participatedConfirmed + participatedBefore, participatedConfirmed, participatedBefore, partial: countAll("l.participation_status='partial'"), filtered: countAll("l.discovery_status='filtered'"), failed: countAll("l.participation_status='failed'") } };
   }
-  listLotteryEvents(lotteryId: number) { return this.rows('SELECT e.*,r.status run_status,j.type run_type FROM lottery_events e LEFT JOIN runs r ON r.id=e.run_id LEFT JOIN jobs j ON j.id=r.job_id WHERE e.lottery_id=? ORDER BY e.id DESC LIMIT 100', [lotteryId]); }
+  listLotteryEvents(lotteryId: number) {
+    const lottery = this.row<any>('SELECT dyid FROM lotteries WHERE id=?', [lotteryId]);
+    if (!lottery) return [];
+    return this.rows('SELECT e.*,r.status run_status,j.type run_type,a.name account_name FROM lottery_events e LEFT JOIN runs r ON r.id=e.run_id LEFT JOIN jobs j ON j.id=r.job_id LEFT JOIN accounts a ON a.id=e.account_id WHERE e.dyid=? ORDER BY e.id DESC LIMIT 100', [lottery.dyid]);
+  }
   upsertParticipation(accountId: number, runId: number, input: ParticipationInput) {
     const lottery = this.row<any>('SELECT * FROM lotteries WHERE account_id=? AND dyid=?', [accountId, input.dyid]) || this.upsertLottery(accountId, { dyid: input.dyid });
     if (!lottery) throw new Error(`抽奖记录不存在：${input.dyid}`);
@@ -231,14 +238,21 @@ export class AppDatabase {
   }
   private listParticipationRecords(scope: 'run' | 'lottery', id: number, query: ParticipationQuery = {}) {
     const page = Math.max(1, Number(query.page) || 1); const pageSize = Math.min(100, Math.max(10, Number(query.pageSize) || 25));
-    const scopeColumn = scope === 'run' ? 'p.run_id' : 'p.lottery_id'; const where = [`${scopeColumn}=?`]; const params: any[] = [id];
+    const scopeColumn = scope === 'run' ? 'p.run_id' : 'p.lottery_id'; const where: string[] = []; const params: any[] = [];
+    if (scope === 'run') { where.push(`${scopeColumn}=?`); params.push(id); }
+    else {
+      const lottery = this.row<any>('SELECT dyid FROM lotteries WHERE id=?', [id]);
+      if (!lottery) return { items: [], page, pageSize, total: 0, pages: 1, summary: { attempted: 0, success: 0, partial: 0, failed: 0 } };
+      where.push('l.dyid=?'); params.push(lottery.dyid);
+    }
     if (query.status && ['success', 'partial', 'failed'].includes(query.status)) { where.push('p.overall_status=?'); params.push(query.status); }
     if (query.search) {
       const term = `%${query.search}%`; where.push('(p.dyid LIKE ? OR l.author LIKE ? OR l.description LIKE ? OR p.comment_text LIKE ? OR p.relay_text LIKE ?)'); params.push(term, term, term, term, term);
     }
     const clause = `WHERE ${where.join(' AND ')}`; const total = Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id ${clause}`, params)?.count || 0);
     const items = this.rows(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,a.name account_name,r.status run_status,r.started_at run_started_at,j.type run_type FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id ${clause} ORDER BY p.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
-    const summaryParams = [id]; const count = (status?: string) => Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p WHERE ${scopeColumn}=?${status ? ' AND p.overall_status=?' : ''}`, status ? [...summaryParams, status] : summaryParams)?.count || 0);
+    const summaryWhere = scope === 'run' ? 'p.run_id=?' : 'p.dyid=?'; const summaryValue = scope === 'run' ? id : this.row<any>('SELECT dyid FROM lotteries WHERE id=?', [id])?.dyid;
+    const count = (status?: string) => Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p WHERE ${summaryWhere}${status ? ' AND p.overall_status=?' : ''}`, status ? [summaryValue, status] : [summaryValue])?.count || 0);
     return { items, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), summary: { attempted: count(), success: count('success'), partial: count('partial'), failed: count('failed') } };
   }
   listRunParticipations(runId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('run', runId, query); }
