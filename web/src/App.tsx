@@ -13,7 +13,10 @@ const api = async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
   if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
   const res = await fetch(path, { credentials: 'include', ...init, headers });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new ApiError(data.error || '请求失败', res.status);
+  if (!res.ok) {
+    if (res.status === 401) window.dispatchEvent(new Event('admin-session-expired'));
+    throw new ApiError(data.error || '请求失败', res.status);
+  }
   return data;
 };
 const date = (value?: string | number) => value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—';
@@ -69,6 +72,11 @@ function App() {
       loadingRef.current = false;
     }
   }, []);
+  useEffect(() => {
+    const handleSessionExpired = () => setAuthed(false);
+    window.addEventListener('admin-session-expired', handleSessionExpired);
+    return () => window.removeEventListener('admin-session-expired', handleSessionExpired);
+  }, []);
   useEffect(() => { api('/api/auth/me').then(() => { setAuthed(true); void load(); }).catch(() => setAuthed(false)); }, [load]);
   useEffect(() => {
     if (!authed) return;
@@ -78,6 +86,7 @@ function App() {
       if (refreshTimer !== undefined) return;
       refreshTimer = window.setTimeout(() => { refreshTimer = undefined; void load(); }, 1000);
     };
+    stream.onerror = () => { void api('/api/auth/me').catch(() => undefined); };
     return () => { stream.close(); if (refreshTimer !== undefined) window.clearTimeout(refreshTimer); };
   }, [authed, load]);
   if (authed === null) return <div className="loading-screen"><RefreshCw className="spin" />正在连接控制台…</div>;
