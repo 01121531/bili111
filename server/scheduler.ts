@@ -2,15 +2,16 @@ import { EventEmitter } from 'node:events';
 import { AppDatabase } from './db';
 import { EngineRunner } from './engine';
 import { AiService } from './ai';
+import { EmailNotificationService } from './notifications';
 
 export class SerialScheduler {
   queue: number[] = [];
   running = false;
   events = new EventEmitter();
   engine: EngineRunner;
-  constructor(private db: AppDatabase, ai = new AiService(db)) {
+  constructor(private db: AppDatabase, ai = new AiService(db), notifications = new EmailNotificationService(db)) {
     this.db.recoverInterruptedJobs();
-    this.engine = new EngineRunner(db, event => this.publish(event), ai);
+    this.engine = new EngineRunner(db, event => this.publish(event), ai, notifications);
   }
   private publish(event: object) {
     try { this.events.emit('event', event); } catch { /* disconnected SSE clients must not stop the queue */ }

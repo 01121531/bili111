@@ -6,6 +6,7 @@ import { hashPassword } from './security';
 export type AccountRow = { id: number; uid: string | null; name: string | null; note: string; cookie: string; cookie_status: string; enabled: number; profile_json: string | null; created_at: string; updated_at: string };
 export type JobRow = { id: number; account_id: number; type: string; status: string; requested_at: string; started_at: string | null; finished_at: string | null; error: string | null };
 export type ScheduleRow = { id: number; account_id: number; type: string; cron: string; enabled: number; last_run_at: string | null; next_run_at: string | null; last_job_id: number | null; created_at: string; updated_at: string };
+export type NotificationRow = { id: number; account_id: number | null; run_id: number | null; channel: string; event_type: string; title: string; content: string; status: string; error: string | null; attempts: number; last_attempt_at: string | null; created_at: string };
 
 export class AppDatabase {
   private constructor(private db: SqlDatabase, private filename: string) {}
@@ -28,6 +29,8 @@ export class AppDatabase {
     this.flush();
     return id;
   }
+  private hasColumn(table: string, column: string) { return this.rows<{ name: string }>(`PRAGMA table_info(${table})`).some(item => item.name === column); }
+  private addColumn(table: string, definition: string) { const column = definition.split(/\s+/)[0]; if (!this.hasColumn(table, column)) this.db.run(`ALTER TABLE ${table} ADD COLUMN ${definition}`); }
   private migrate() {
     this.db.run(`CREATE TABLE IF NOT EXISTS accounts (id INTEGER PRIMARY KEY AUTOINCREMENT, uid TEXT UNIQUE, name TEXT, note TEXT NOT NULL DEFAULT '', cookie TEXT NOT NULL, cookie_status TEXT NOT NULL DEFAULT 'unknown', enabled INTEGER NOT NULL DEFAULT 1, profile_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account_configs (account_id INTEGER PRIMARY KEY, config_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
@@ -35,10 +38,18 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, account_id INTEGER NOT NULL, status TEXT NOT NULL, discovered_count INTEGER NOT NULL DEFAULT 0, attempted_count INTEGER NOT NULL DEFAULT 0, success_count INTEGER NOT NULL DEFAULT 0, error_count INTEGER NOT NULL DEFAULT 0, started_at TEXT NOT NULL, finished_at TEXT, error TEXT);
       CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, account_id INTEGER NOT NULL, level TEXT NOT NULL, context TEXT, message TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS lotteries (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, dyid TEXT NOT NULL, source TEXT, author TEXT, description TEXT, draw_time INTEGER, official INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'discovered', url TEXT, created_at TEXT NOT NULL, UNIQUE(account_id,dyid));
-      CREATE TABLE IF NOT EXISTS win_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, source TEXT NOT NULL, content TEXT NOT NULL, url TEXT, matched INTEGER NOT NULL DEFAULT 1, is_read INTEGER NOT NULL DEFAULT 0, detected_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, channel TEXT NOT NULL, title TEXT, content TEXT, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS win_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, source TEXT NOT NULL, actor TEXT, content TEXT NOT NULL, url TEXT, occurred_at TEXT, event_key TEXT, matched INTEGER NOT NULL DEFAULT 1, is_read INTEGER NOT NULL DEFAULT 0, detected_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, run_id INTEGER, channel TEXT NOT NULL, event_type TEXT NOT NULL DEFAULT '', title TEXT, content TEXT, status TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account_schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, type TEXT NOT NULL, cron TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_run_at TEXT, next_run_at TEXT, last_job_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(account_id,type));
       CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
+    this.addColumn('win_events', 'actor TEXT');
+    this.addColumn('win_events', 'occurred_at TEXT');
+    this.addColumn('win_events', 'event_key TEXT');
+    this.addColumn('notifications', 'run_id INTEGER');
+    this.addColumn('notifications', "event_type TEXT NOT NULL DEFAULT ''");
+    this.addColumn('notifications', 'attempts INTEGER NOT NULL DEFAULT 0');
+    this.addColumn('notifications', 'last_attempt_at TEXT');
+    this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_win_events_event_key ON win_events(event_key) WHERE event_key IS NOT NULL');
     this.flush(); if (!this.getSetting('admin_password_hash')) this.setSetting('admin_password_hash', hashPassword(process.env.ADMIN_PASSWORD || 'admin'));
   }
   now() { return new Date().toISOString(); }
@@ -46,7 +57,7 @@ export class AppDatabase {
   setSetting(key: string, value: string) { this.run('INSERT INTO system_settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [key, value]); }
   listAccounts() { return this.rows<Omit<AccountRow, 'cookie'>>('SELECT id,uid,name,note,cookie_status,enabled,profile_json,created_at,updated_at FROM accounts ORDER BY id DESC'); }
   getAccount(id: number) { return this.row<AccountRow>('SELECT * FROM accounts WHERE id=?', [id]); }
-  createAccount(input: { uid?: string | null; name?: string | null; note?: string; cookie: string; profile?: object | null }) { const now = this.now(); const id = this.insert('INSERT INTO accounts(uid,name,note,cookie,profile_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)', [input.uid || null, input.name || null, input.note || '', input.cookie, input.profile ? JSON.stringify(input.profile) : null, now, now]); this.run('INSERT INTO account_configs(account_id,config_json,updated_at) VALUES (?,?,?)', [id, '{}', now]); return this.getAccount(id); }
+  createAccount(input: { uid?: string | null; name?: string | null; note?: string; cookie: string; profile?: object | null }) { const now = this.now(); const id = this.insert('INSERT INTO accounts(uid,name,note,cookie,cookie_status,profile_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)', [input.uid || null, input.name || null, input.note || '', input.cookie, 'valid', input.profile ? JSON.stringify(input.profile) : null, now, now]); this.run('INSERT INTO account_configs(account_id,config_json,updated_at) VALUES (?,?,?)', [id, '{}', now]); return this.getAccount(id); }
   updateAccount(id: number, patch: { note?: string; enabled?: boolean; name?: string; cookieStatus?: string; profile?: object }) { const current = this.getAccount(id); if (!current) return undefined; this.run('UPDATE accounts SET note=?,enabled=?,name=?,cookie_status=?,profile_json=?,updated_at=? WHERE id=?', [patch.note ?? current.note, patch.enabled === undefined ? current.enabled : (patch.enabled ? 1 : 0), patch.name ?? current.name, patch.cookieStatus ?? current.cookie_status, patch.profile ? JSON.stringify(patch.profile) : current.profile_json, this.now(), id]); return this.getAccount(id); }
   updateAccountCookie(id: number, cookie: string, profile?: { uid?: string; name?: string }) { this.run('UPDATE accounts SET cookie=?,uid=COALESCE(?,uid),name=COALESCE(?,name),cookie_status=?,profile_json=COALESCE(?,profile_json),updated_at=? WHERE id=?', [cookie, profile?.uid || null, profile?.name || null, 'valid', profile ? JSON.stringify(profile) : null, this.now(), id]); return this.getAccount(id); }
   deleteAccount(id: number) { this.run('DELETE FROM account_schedules WHERE account_id=?', [id]); this.run('DELETE FROM accounts WHERE id=?', [id]); }
@@ -69,7 +80,16 @@ export class AppDatabase {
   addLottery(accountId: number, dyid: string, source = 'runtime', url = `https://t.bilibili.com/${dyid}`) { this.run('INSERT OR IGNORE INTO lotteries(account_id,dyid,source,url,created_at) VALUES (?,?,?,?,?)', [accountId, dyid, source, url, this.now()]); }
   listLotteries(limit = 100) { return this.rows('SELECT l.*,a.name account_name FROM lotteries l JOIN accounts a ON a.id=l.account_id ORDER BY l.id DESC LIMIT ?', [limit]); }
   listWins(limit = 100) { return this.rows('SELECT w.*,a.name account_name FROM win_events w JOIN accounts a ON a.id=w.account_id ORDER BY w.id DESC LIMIT ?', [limit]); }
+  addWinEvent(input: { accountId: number; source: string; actor: string; content: string; url: string; occurredAt: string; eventKey: string }) {
+    if (this.row('SELECT id FROM win_events WHERE event_key=?', [input.eventKey])) return undefined;
+    const id = this.insert('INSERT INTO win_events(account_id,source,actor,content,url,occurred_at,event_key,detected_at) VALUES (?,?,?,?,?,?,?,?)', [input.accountId, input.source, input.actor, input.content, input.url, input.occurredAt, input.eventKey, this.now()]);
+    return this.row('SELECT * FROM win_events WHERE id=?', [id]);
+  }
   markWinRead(id: number) { this.run('UPDATE win_events SET is_read=1 WHERE id=?', [id]); }
+  addNotification(input: { accountId?: number | null; runId?: number | null; eventType: string; title: string; content: string }) { return this.insert('INSERT INTO notifications(account_id,run_id,channel,event_type,title,content,status,created_at) VALUES (?,?,?,?,?,?,?,?)', [input.accountId || null, input.runId || null, 'email', input.eventType, input.title, input.content, 'pending', this.now()]); }
+  updateNotification(id: number, status: string, attempts: number, error?: string) { this.run('UPDATE notifications SET status=?,attempts=?,error=?,last_attempt_at=? WHERE id=?', [status, attempts, error || null, this.now(), id]); }
+  latestNotification(accountId: number, eventType: string) { return this.row<NotificationRow>('SELECT * FROM notifications WHERE account_id=? AND event_type=? ORDER BY id DESC LIMIT 1', [accountId, eventType]); }
+  listNotifications(limit = 100) { return this.rows('SELECT n.*,a.name account_name,a.uid FROM notifications n LEFT JOIN accounts a ON a.id=n.account_id ORDER BY n.id DESC LIMIT ?', [limit]); }
   listSchedules(accountId?: number) {
     const where = accountId ? 'WHERE s.account_id=?' : '';
     return this.rows<ScheduleRow & { account_name: string | null; uid: string | null }>(`SELECT s.*,a.name account_name,a.uid FROM account_schedules s JOIN accounts a ON a.id=s.account_id ${where} ORDER BY s.account_id,s.type`, accountId ? [accountId] : []);

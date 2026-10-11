@@ -13,12 +13,14 @@ import { mergedConfig } from './config';
 import { UpdateService } from './updater';
 import { AiService } from './ai';
 import { AccountScheduleService, nextScheduleRun, scheduleJobTypes } from './account-schedules';
+import { EmailNotificationService } from './notifications';
 
 async function bootstrap() {
 const app = Fastify({ logger: false });
 const db = await AppDatabase.create();
 const ai = new AiService(db);
-const scheduler = new SerialScheduler(db, ai);
+const notifications = new EmailNotificationService(db);
+const scheduler = new SerialScheduler(db, ai, notifications);
 const accountSchedules = new AccountScheduleService(db, scheduler);
 const updater = new UpdateService(db);
 const sessions = new Set<string>();
@@ -49,7 +51,14 @@ app.post('/api/accounts/cookie', { preHandler: auth }, async (request, reply) =>
 });
 app.patch('/api/accounts/:id', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); const row = db.updateAccount(id, request.body as any); if (!row) return reply.code(404).send({ error: '账号不存在' }); return publicAccount(row); });
 app.delete('/api/accounts/:id', { preHandler: auth }, async (request) => { db.deleteAccount(parseId((request.params as any).id)); return { ok: true }; });
-app.post('/api/accounts/:id/verify', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); const account = db.getAccount(id); if (!account) return reply.code(404).send({ error: '账号不存在' }); const verified = await verifyBiliCookie(decrypt(account.cookie)); if (!verified.ok) { db.updateAccount(id, { cookieStatus: 'invalid' }); return reply.code(400).send(verified); } db.updateAccountCookie(id, account.cookie, verified.profile); return { ok: true, profile: verified.profile }; });
+app.post('/api/accounts/:id/verify', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); const account = db.getAccount(id); if (!account) return reply.code(404).send({ error: '账号不存在' });
+  const verified = await verifyBiliCookie(decrypt(account.cookie));
+  if (!verified.ok) { db.updateAccount(id, { cookieStatus: 'invalid' }); void notifications.notifyInvalid(db.getAccount(id)!, verified.error || 'B站登录验证失败').catch(() => undefined); return reply.code(400).send(verified); }
+  const wasInvalid = account.cookie_status === 'invalid'; const updated = db.updateAccountCookie(id, account.cookie, verified.profile)!;
+  if (wasInvalid) void notifications.notifyRecovery(updated).catch(() => undefined);
+  return { ok: true, profile: verified.profile };
+});
 
 app.post('/api/accounts/qr/start', { preHandler: auth }, async () => { const qr = await createQrSession(); const id = randomBytes(10).toString('hex'); qrSessions.set(id, { key: qr.key, expires: Date.now() + 180000 }); return { sessionId: id, image: qr.image, expiresAt: Date.now() + 180000 }; });
 app.post('/api/accounts/qr/:sessionId/poll', { preHandler: auth }, async (request, reply) => { const session = qrSessions.get((request.params as any).sessionId); if (!session || session.expires < Date.now()) return reply.code(410).send({ status: 'expired' }); const result = await pollQrSession(session.key); if (result.status === 'success' && result.rawCookie) { const verified = await verifyBiliCookie(result.rawCookie); if (!verified.ok) return reply.code(400).send(verified); const row = db.createAccount({ cookie: encrypt(result.rawCookie), uid: verified.profile.uid, name: verified.profile.name, profile: verified.profile }); qrSessions.delete((request.params as any).sessionId); return { ...result, rawCookie: undefined, account: publicAccount(row) }; } return { ...result, rawCookie: undefined }; });
@@ -130,6 +139,15 @@ app.post('/api/accounts/:id/ai-test', { preHandler: auth }, async (request, repl
   const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
   try { return await ai.test((request.body || {}) as Record<string, unknown>, id); } catch (error) { return reply.code(502).send({ error: String(error) }); }
 });
+app.get('/api/notifications/email/config', { preHandler: auth }, async () => notifications.getPublic());
+app.put('/api/notifications/email/config', { preHandler: auth }, async (request, reply) => {
+  try { return notifications.save((request.body || {}) as Record<string, unknown>); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+});
+app.post('/api/notifications/email/test', { preHandler: auth }, async (request, reply) => {
+  try { const result = await notifications.sendTest(); return result?.ok ? result : reply.code(502).send({ error: result?.error || '测试邮件发送失败' }); }
+  catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : String(error) }); }
+});
+app.get('/api/notifications', { preHandler: auth }, async () => db.listNotifications());
 app.get('/api/update/status', { preHandler: auth }, async () => updater.status());
 app.post('/api/update/check', { preHandler: auth }, async (request, reply) => {
   try { return await updater.check(); } catch (error) { return reply.code(502).send({ error: String(error) }); }

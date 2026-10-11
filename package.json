@@ -7,7 +7,7 @@
     "login": "node main.js login",
     "start": "node main.js start",
     "test": "node test/index.js",
-    "test:unit": "node --test test/unit/*.test.js",
+    "test:unit": "tsx --test test/unit/*.test.js test/unit/*.test.ts",
     "clear": "node main.js clear",
     "check": "node main.js check",
     "update": "node main.js update",

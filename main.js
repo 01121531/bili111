@@ -138,6 +138,8 @@ async function main() {
                 log.info('登陆', '开始扫码');
                 await login(NUMBER);
                 await delay(1000);
+            } else {
+                return `COOKIE${NUMBER} 已失效`;
             }
         }
     } else {
