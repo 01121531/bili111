@@ -167,3 +167,36 @@ test('新版专栏 opus 节点中的动态链接会被提取', () => {
         'https://t.bilibili.com/1250780096826966017'
     ]);
 });
+
+test('动态详情风控码不会重复切换同一线路', () => {
+    const [shouldSwitch, value, message] = bili._getOneDynamicByDyid.pub_handler(
+        JSON.stringify({ code: -352, message: '-352' })
+    );
+    assert.equal(shouldSwitch, false);
+    assert.equal(value, null);
+    assert.match(message, /停止继续请求/);
+});
+
+test('专栏触发风控后停止当前专栏并跳过后续专栏来源', async () => {
+    const originalGetOneArticleByCv = bili.getOneArticleByCv;
+    const originalGetOneDynamicByDyid = bili.getOneDynamicByDyid;
+    const searcher = new Searcher();
+    searcher.taskContext = {};
+    let articleCalls = 0;
+    bili.getOneArticleByCv = async () => {
+        articleCalls += 1;
+        return 'https://www.bilibili.com/opus/1253856929797636100';
+    };
+    bili.getOneDynamicByDyid = async () => null;
+    const article = [{ id: 53378913, pub_time: Math.floor(Date.now() / 1000) }];
+
+    try {
+        assert.deepEqual(await searcher.getLotteryInfoFromArticles(article, 'article_uid'), []);
+        assert.equal(searcher.taskContext.dynamicRiskBlocked, true);
+        assert.deepEqual(await searcher.getLotteryInfoFromArticles(article, 'article_uid'), []);
+        assert.equal(articleCalls, 1);
+    } finally {
+        bili.getOneArticleByCv = originalGetOneArticleByCv;
+        bili.getOneDynamicByDyid = originalGetOneDynamicByDyid;
+    }
+});
