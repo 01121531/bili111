@@ -49,7 +49,7 @@ export class EngineRunner {
         const safe = message.replace(/(SESSDATA|bili_jct|DedeUserID|buvid3)=[^;\s]+/gi, '$1=••••••');
         if (/抽奖信息|动态/.test(safe)) discovered += /动态/.test(safe) ? 1 : 0;
         if (/成功/.test(safe)) success += 1;
-        if (/失败|Error|错误/.test(safe)) errors += 1;
+        if (level === 'error' || /\[(?:Error|错误)\]/i.test(safe)) errors += 1;
         if (mode !== 'discover' && /转发|评论|点赞|关注|预约/.test(safe)) attempted += 1;
         const context = safe.match(/\[帐号\d+ ([^\]]+)/)?.[1] || 'engine';
         const log = this.db.addLog(runId, account.id, level, context, safe);

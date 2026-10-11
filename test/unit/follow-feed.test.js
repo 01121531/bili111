@@ -151,3 +151,19 @@ test('专栏正文请求失败不会静默记录为成功 0 条', async () => {
         bili.getOneArticleByCv = originalGetOneArticleByCv;
     }
 });
+
+test('新版专栏 opus 节点中的动态链接会被提取', () => {
+    const links = bili.collectArticleDynamicLinks({
+        content: {
+            paragraphs: [
+                { text: { nodes: [{ link: { link: 'https://www.bilibili.com/opus/1253856929797636100?from=article' } }] } },
+                { text: { nodes: [{ link: { link: 'https://t.bilibili.com/1250780096826966017' } }] } },
+                { text: { nodes: [{ link: { link: 'https://example.com/123456789012345678' } }] } }
+            ]
+        }
+    });
+    assert.deepEqual(links, [
+        'https://www.bilibili.com/opus/1253856929797636100?from=article',
+        'https://t.bilibili.com/1250780096826966017'
+    ]);
+});
