@@ -12,12 +12,14 @@ import { SerialScheduler } from './scheduler';
 import { mergedConfig } from './config';
 import { UpdateService } from './updater';
 import { AiService } from './ai';
+import { AccountScheduleService, nextScheduleRun, scheduleJobTypes } from './account-schedules';
 
 async function bootstrap() {
 const app = Fastify({ logger: false });
 const db = await AppDatabase.create();
 const ai = new AiService(db);
 const scheduler = new SerialScheduler(db, ai);
+const accountSchedules = new AccountScheduleService(db, scheduler);
 const updater = new UpdateService(db);
 const sessions = new Set<string>();
 const qrSessions = new Map<string, { key: string; expires: number }>();
@@ -55,6 +57,21 @@ app.post('/api/accounts/qr/:sessionId/poll', { preHandler: auth }, async (reques
 app.post('/api/accounts/:id/jobs', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const type = (request.body as any)?.type || 'start'; if (!['start', 'check', 'clear', 'account'].includes(type)) return reply.code(400).send({ error: '不支持的任务类型' }); return scheduler.enqueue(id, type); });
 app.post('/api/jobs/:id/cancel', { preHandler: auth }, async (request) => ({ ok: scheduler.cancel(parseId((request.params as any).id)) }));
 app.get('/api/jobs', { preHandler: auth }, async () => db.listJobs());
+app.get('/api/schedules', { preHandler: auth }, async () => db.listSchedules());
+app.get('/api/accounts/:id/schedules', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return db.listSchedules(id);
+});
+app.put('/api/accounts/:id/schedules/:type', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); const type = String((request.params as any).type); const body = (request.body || {}) as { cron?: string; enabled?: boolean };
+  if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  if (!scheduleJobTypes.includes(type as any)) return reply.code(400).send({ error: '不支持的定时任务类型' });
+  const cron = String(body.cron || '').trim();
+  try { nextScheduleRun(cron); return accountSchedules.save(id, type as any, cron, body.enabled !== false); }
+  catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : 'Cron 格式错误' }); }
+});
+app.delete('/api/schedules/:id', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getSchedule(id)) return reply.code(404).send({ error: '定时任务不存在' }); db.deleteSchedule(id); return { ok: true };
+});
 app.get('/api/runs', { preHandler: auth }, async () => db.listRuns());
 app.get('/api/runs/:id/logs', { preHandler: auth }, async (request) => db.listLogs(parseId((request.params as any).id)));
 app.get('/api/logs/stream', { preHandler: auth }, async (request, reply) => {
@@ -126,6 +143,7 @@ const dist = join(process.cwd(), 'web', 'dist');
 if (existsSync(dist)) { await app.register(fastifyStatic, { root: dist }); app.setNotFoundHandler((request, reply) => request.raw.url?.startsWith('/api/') ? reply.code(404).send({ error: '接口不存在' }) : reply.sendFile('index.html')); }
 
 const port = Number(process.env.PORT || 6666);
+app.addHook('onClose', async () => accountSchedules.stop());
 await app.listen({ port, host: process.env.HOST || '0.0.0.0' });
 console.log(`Lottery web console listening on http://localhost:${port}`);
 }

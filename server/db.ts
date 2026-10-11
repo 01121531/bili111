@@ -5,6 +5,7 @@ import { hashPassword } from './security';
 
 export type AccountRow = { id: number; uid: string | null; name: string | null; note: string; cookie: string; cookie_status: string; enabled: number; profile_json: string | null; created_at: string; updated_at: string };
 export type JobRow = { id: number; account_id: number; type: string; status: string; requested_at: string; started_at: string | null; finished_at: string | null; error: string | null };
+export type ScheduleRow = { id: number; account_id: number; type: string; cron: string; enabled: number; last_run_at: string | null; next_run_at: string | null; last_job_id: number | null; created_at: string; updated_at: string };
 
 export class AppDatabase {
   private constructor(private db: SqlDatabase, private filename: string) {}
@@ -36,6 +37,7 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS lotteries (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, dyid TEXT NOT NULL, source TEXT, author TEXT, description TEXT, draw_time INTEGER, official INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'discovered', url TEXT, created_at TEXT NOT NULL, UNIQUE(account_id,dyid));
       CREATE TABLE IF NOT EXISTS win_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, source TEXT NOT NULL, content TEXT NOT NULL, url TEXT, matched INTEGER NOT NULL DEFAULT 1, is_read INTEGER NOT NULL DEFAULT 0, detected_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, channel TEXT NOT NULL, title TEXT, content TEXT, status TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS account_schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, type TEXT NOT NULL, cron TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_run_at TEXT, next_run_at TEXT, last_job_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(account_id,type));
       CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
     this.flush(); if (!this.getSetting('admin_password_hash')) this.setSetting('admin_password_hash', hashPassword(process.env.ADMIN_PASSWORD || 'admin'));
   }
@@ -47,7 +49,7 @@ export class AppDatabase {
   createAccount(input: { uid?: string | null; name?: string | null; note?: string; cookie: string; profile?: object | null }) { const now = this.now(); const id = this.insert('INSERT INTO accounts(uid,name,note,cookie,profile_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?)', [input.uid || null, input.name || null, input.note || '', input.cookie, input.profile ? JSON.stringify(input.profile) : null, now, now]); this.run('INSERT INTO account_configs(account_id,config_json,updated_at) VALUES (?,?,?)', [id, '{}', now]); return this.getAccount(id); }
   updateAccount(id: number, patch: { note?: string; enabled?: boolean; name?: string; cookieStatus?: string; profile?: object }) { const current = this.getAccount(id); if (!current) return undefined; this.run('UPDATE accounts SET note=?,enabled=?,name=?,cookie_status=?,profile_json=?,updated_at=? WHERE id=?', [patch.note ?? current.note, patch.enabled === undefined ? current.enabled : (patch.enabled ? 1 : 0), patch.name ?? current.name, patch.cookieStatus ?? current.cookie_status, patch.profile ? JSON.stringify(patch.profile) : current.profile_json, this.now(), id]); return this.getAccount(id); }
   updateAccountCookie(id: number, cookie: string, profile?: { uid?: string; name?: string }) { this.run('UPDATE accounts SET cookie=?,uid=COALESCE(?,uid),name=COALESCE(?,name),cookie_status=?,profile_json=COALESCE(?,profile_json),updated_at=? WHERE id=?', [cookie, profile?.uid || null, profile?.name || null, 'valid', profile ? JSON.stringify(profile) : null, this.now(), id]); return this.getAccount(id); }
-  deleteAccount(id: number) { this.run('DELETE FROM accounts WHERE id=?', [id]); }
+  deleteAccount(id: number) { this.run('DELETE FROM account_schedules WHERE account_id=?', [id]); this.run('DELETE FROM accounts WHERE id=?', [id]); }
   getConfig(id: number) { const row = this.row<{ config_json: string }>('SELECT config_json FROM account_configs WHERE account_id=?', [id]); return row ? JSON.parse(row.config_json) : {}; }
   setConfig(id: number, config: object) { this.run('INSERT INTO account_configs(account_id,config_json,updated_at) VALUES (?,?,?) ON CONFLICT(account_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at', [id, JSON.stringify(config), this.now()]); }
   createJob(accountId: number, type: string) { const id = this.insert('INSERT INTO jobs(account_id,type,requested_at) VALUES (?,?,?)', [accountId, type, this.now()]); return this.getJob(id)!; }
@@ -68,5 +70,19 @@ export class AppDatabase {
   listLotteries(limit = 100) { return this.rows('SELECT l.*,a.name account_name FROM lotteries l JOIN accounts a ON a.id=l.account_id ORDER BY l.id DESC LIMIT ?', [limit]); }
   listWins(limit = 100) { return this.rows('SELECT w.*,a.name account_name FROM win_events w JOIN accounts a ON a.id=w.account_id ORDER BY w.id DESC LIMIT ?', [limit]); }
   markWinRead(id: number) { this.run('UPDATE win_events SET is_read=1 WHERE id=?', [id]); }
+  listSchedules(accountId?: number) {
+    const where = accountId ? 'WHERE s.account_id=?' : '';
+    return this.rows<ScheduleRow & { account_name: string | null; uid: string | null }>(`SELECT s.*,a.name account_name,a.uid FROM account_schedules s JOIN accounts a ON a.id=s.account_id ${where} ORDER BY s.account_id,s.type`, accountId ? [accountId] : []);
+  }
+  getSchedule(id: number) { return this.row<ScheduleRow>('SELECT * FROM account_schedules WHERE id=?', [id]); }
+  upsertSchedule(accountId: number, type: string, cron: string, enabled: boolean, nextRunAt: string | null) {
+    const now = this.now();
+    this.run(`INSERT INTO account_schedules(account_id,type,cron,enabled,next_run_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?)
+      ON CONFLICT(account_id,type) DO UPDATE SET cron=excluded.cron,enabled=excluded.enabled,next_run_at=excluded.next_run_at,updated_at=excluded.updated_at`, [accountId, type, cron, enabled ? 1 : 0, nextRunAt, now, now]);
+    return this.row<ScheduleRow>('SELECT * FROM account_schedules WHERE account_id=? AND type=?', [accountId, type])!;
+  }
+  deleteSchedule(id: number) { this.run('DELETE FROM account_schedules WHERE id=?', [id]); }
+  listDueSchedules(now: string) { return this.rows<ScheduleRow>('SELECT * FROM account_schedules WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=? ORDER BY next_run_at,id', [now]); }
+  markScheduleTriggered(id: number, jobId: number | null, nextRunAt: string) { this.run('UPDATE account_schedules SET last_run_at=?,last_job_id=?,next_run_at=?,updated_at=? WHERE id=?', [this.now(), jobId, nextRunAt, this.now(), id]); }
   stats() { const today = new Date().toISOString().slice(0, 10); const count = (sql: string, params: any[] = []) => Number(this.row<any>(sql, params)?.count || 0); return { accounts: count('SELECT COUNT(*) count FROM accounts'), activeAccounts: count("SELECT COUNT(*) count FROM accounts WHERE enabled=1 AND cookie_status='valid'"), lotteriesToday: count('SELECT COUNT(*) count FROM lotteries WHERE created_at LIKE ?', [`${today}%`]), winsUnread: count('SELECT COUNT(*) count FROM win_events WHERE is_read=0'), runsToday: count('SELECT COUNT(*) count FROM runs WHERE started_at LIKE ?', [`${today}%`]), successToday: count("SELECT COUNT(*) count FROM runs WHERE started_at LIKE ? AND status='success'", [`${today}%`]) }; }
 }
