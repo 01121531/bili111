@@ -6,6 +6,7 @@ import { decrypt } from './security';
 import { runtimeConfig } from './config';
 import { AiService } from './ai';
 import { EmailNotificationService, RuntimeEvent } from './notifications';
+import { parseDrawTime } from './lottery-enricher';
 
 export type EngineResult = { code: number; discovered: number; attempted: number; success: number; errors: number };
 
@@ -44,24 +45,36 @@ export class EngineRunner {
       stdio: ['ignore', 'pipe', 'pipe']
     });
     this.processes.set(jobId, child);
-    let discovered = 0; let attempted = 0; let success = 0; let errors = 0; let stdoutBuffer = ''; let stderrBuffer = ''; const runtimeEvents: RuntimeEvent[] = [];
+    let discovered = 0; let attempted = 0; let success = 0; let errors = 0; let stdoutBuffer = ''; let stderrBuffer = ''; const runtimeEvents: RuntimeEvent[] = []; const discoveredIds = new Set<string>();
     const consumeLine = (raw: string, level: string) => {
       const message = raw.trim(); if (!message) return;
       if (message.startsWith('[LOTTERY_WEB_EVENT]')) {
-        try { runtimeEvents.push(JSON.parse(message.slice('[LOTTERY_WEB_EVENT]'.length)) as RuntimeEvent); }
+        try {
+          const event = JSON.parse(message.slice('[LOTTERY_WEB_EVENT]'.length)) as { type: string; lottery?: Record<string, unknown>; [key: string]: unknown };
+          if (event.type === 'lottery' && event.lottery?.dyid) {
+            const dyid = String(event.lottery.dyid);
+            const description = String(event.lottery.description || ''); const sourceCreatedAt = Number(event.lottery.sourceCreatedAt || 0) || null;
+            const drawTime = Number(event.lottery.drawTime || 0) || parseDrawTime(description, sourceCreatedAt);
+            if (!discoveredIds.has(dyid)) { discoveredIds.add(dyid); discovered += 1; }
+            this.db.upsertLottery(account.id, {
+              dyid, source: String(event.lottery.source || '') || undefined, author: String(event.lottery.author || '') || undefined,
+              description: description || undefined, drawTime,
+              official: event.lottery.official === undefined ? undefined : Boolean(event.lottery.official), status: String(event.lottery.status || '') || undefined,
+              resultReason: event.lottery.resultReason === undefined ? undefined : String(event.lottery.resultReason || ''), url: String(event.lottery.url || '') || undefined,
+              sourceCreatedAt, enrichmentStatus: event.lottery.description ? 'complete' : undefined
+            });
+          } else runtimeEvents.push(event as unknown as RuntimeEvent);
+        }
         catch { errors += 1; }
         return;
       }
       const safe = message.replace(/(SESSDATA|bili_jct|DedeUserID|buvid3)=[^;\s]+/gi, '$1=••••••');
-      if (/抽奖信息|动态/.test(safe)) discovered += /动态/.test(safe) ? 1 : 0;
       if (/成功/.test(safe)) success += 1;
       if (level === 'error' || /\[(?:Error|错误)\]/i.test(safe)) errors += 1;
       if (mode !== 'discover' && /转发|评论|点赞|关注|预约/.test(safe)) attempted += 1;
       const context = safe.match(/\[帐号\d+ ([^\]]+)/)?.[1] || 'engine';
       const log = this.db.addLog(runId, account.id, level, context, safe);
       this.emit({ type: 'log', payload: log });
-      const dyid = safe.match(/t\.bilibili\.com\/(\d{8,})/)?.[1];
-      if (dyid) this.db.addLottery(account.id, dyid, mode);
     };
     const consume = (chunk: Buffer, level: string) => {
       const combined = (level === 'info' ? stdoutBuffer : stderrBuffer) + chunk.toString(); const lines = combined.split(/\r?\n/); const remainder = lines.pop() || '';

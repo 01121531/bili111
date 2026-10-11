@@ -7,6 +7,7 @@ import { EmailNotificationService } from './notifications';
 export class SerialScheduler {
   queue: number[] = [];
   running = false;
+  private maintenance = false;
   events = new EventEmitter();
   engine: EngineRunner;
   constructor(private db: AppDatabase, ai = new AiService(db), notifications = new EmailNotificationService(db)) {
@@ -17,9 +18,12 @@ export class SerialScheduler {
     try { this.events.emit('event', event); } catch { /* disconnected SSE clients must not stop the queue */ }
   }
   enqueue(accountId: number, type: string) { const job = this.db.createJob(accountId, type); this.queue.push(job.id); this.publish({ type: 'job', payload: job }); this.pump(); return job; }
+  isIdle() { return !this.running && !this.maintenance && this.queue.length === 0; }
+  beginMaintenance() { if (!this.isIdle()) return false; this.maintenance = true; return true; }
+  endMaintenance() { this.maintenance = false; void this.pump(); }
   cancel(jobId: number) { if (this.engine.cancel(jobId)) return true; this.db.updateJob(jobId, 'cancelled'); this.queue = this.queue.filter(id => id !== jobId); return true; }
   async pump() {
-    if (this.running) return;
+    if (this.running || this.maintenance) return;
     this.running = true;
     while (this.queue.length) {
       const jobId = this.queue.shift()!; const job = this.db.getJob(jobId); if (!job || job.status !== 'pending') continue;

@@ -46,10 +46,38 @@ function number(value: unknown, fallback: number, min: number, max: number) { co
 function bool(value: unknown, fallback: boolean) { return typeof value === 'boolean' ? value : fallback; }
 function string(value: unknown, fallback: string, max = 4000) { return typeof value === 'string' ? value.slice(0, max) : fallback; }
 
+export function resolveChatCompletionsUrl(value: string) {
+  let url: URL;
+  try { url = new URL(String(value || '').trim()); } catch { throw new Error('AI Base URL 格式无效'); }
+  if (url.protocol !== 'https:') throw new Error('AI Base URL 必须使用 HTTPS');
+  url.hash = '';
+  const path = url.pathname.replace(/\/+$/, '');
+  if (/\/(?:compatible-mode\/)?v1$/i.test(path)) url.pathname = `${path}/chat/completions`;
+  else if (!path) url.pathname = '/v1/chat/completions';
+  else url.pathname = path;
+  return url.toString().replace(/\/$/, '');
+}
+
+class AiRequestError extends Error {
+  constructor(message: string, readonly retryable = false) { super(message); this.name = 'AiRequestError'; }
+}
+
+function readableFetchError(error: unknown, timeoutMs: number) {
+  const value = error as Error & { cause?: { code?: string; message?: string } };
+  const code = String(value?.cause?.code || ''); const detail = String(value?.cause?.message || value?.message || '');
+  if (value?.name === 'AbortError') return new AiRequestError(`AI 请求超时（${timeoutMs}ms）`, true);
+  if (/redirect count exceeded/i.test(detail)) return new AiRequestError('AI 接口发生重定向循环，请检查地址是否包含 /chat/completions', false);
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return new AiRequestError(`AI 服务域名解析失败（${code}）`, true);
+  if (code === 'ECONNREFUSED') return new AiRequestError('AI 服务拒绝连接', true);
+  if (code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') return new AiRequestError('连接 AI 服务超时', true);
+  if (/certificate|tls|ssl/i.test(`${code} ${detail}`)) return new AiRequestError('AI 服务 TLS 证书验证失败', false);
+  return new AiRequestError(`AI 网络请求失败${code ? `（${code}）` : ''}`, true);
+}
+
 function normalize(input: Record<string, unknown>, previous: AiConfig = defaultConfig): AiConfig {
   return {
     ...previous,
-    provider: string(input.provider, previous.provider, 40), baseUrl: string(input.baseUrl, previous.baseUrl, 500), model: string(input.model, previous.model, 160),
+    provider: string(input.provider, previous.provider, 40), baseUrl: resolveChatCompletionsUrl(string(input.baseUrl, previous.baseUrl, 500)), model: string(input.model, previous.model, 160),
     temperature: number(input.temperature, previous.temperature, 0, 2), maxTokens: number(input.maxTokens, previous.maxTokens, 32, 4000),
     timeoutMs: number(input.timeoutMs, previous.timeoutMs, 5000, 180000), retries: number(input.retries, previous.retries, 0, 3),
     enableJudge: bool(input.enableJudge, previous.enableJudge), enableComments: bool(input.enableComments, previous.enableComments), enableRelay: bool(input.enableRelay, previous.enableRelay),
@@ -73,7 +101,18 @@ function cleanContent(value: string, config: AiConfig) {
 }
 
 export class AiService {
-  constructor(private db: AppDatabase) {}
+  constructor(private db: AppDatabase) {
+    const raw = this.db.getSetting('ai_global_config');
+    if (raw) {
+      try {
+        const stored = JSON.parse(raw) as Record<string, unknown>;
+        if (typeof stored.baseUrl === 'string') {
+          const normalized = resolveChatCompletionsUrl(stored.baseUrl);
+          if (normalized !== stored.baseUrl) this.db.setSetting('ai_global_config', JSON.stringify({ ...stored, baseUrl: normalized }));
+        }
+      } catch { /* invalid legacy settings fall back to defaults */ }
+    }
+  }
   listProviders() { return providers; }
 
   private readStored(): AiConfig {
@@ -137,19 +176,23 @@ export class AiService {
   }
 
   async complete(config: AiConfig, systemPrompt: string, content: string) {
-    const url = config.baseUrl.replace(/\/$/, '');
-    if (!/^https:\/\//i.test(url)) throw new Error('AI Base URL 必须使用 HTTPS');
+    const url = resolveChatCompletionsUrl(config.baseUrl);
     let lastError: unknown;
     for (let attempt = 0; attempt <= config.retries; attempt += 1) {
       const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), config.timeoutMs);
       try {
         const response = await fetch(url, { method: 'POST', signal: controller.signal, headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify({ model: config.model, temperature: config.temperature, max_tokens: config.maxTokens, stream: false, messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: `<public_dynamic>\n${content.slice(0, 12000)}\n</public_dynamic>` }] }) });
         const body = await response.json().catch(() => ({})) as any;
-        if (!response.ok) throw new Error(`AI 服务返回 ${response.status}: ${String(body.error?.message || body.message || '请求失败').slice(0, 200)}`);
+        if (!response.ok) throw new AiRequestError(`AI 服务返回 ${response.status}: ${String(body.error?.message || body.message || '请求失败').slice(0, 200)}`, [408, 425, 429, 500, 502, 503, 504].includes(response.status));
         const output = body.choices?.[0]?.message?.content;
         if (typeof output !== 'string') throw new Error('AI 响应缺少文本内容');
         return cleanContent(output, config);
-      } catch (error) { lastError = error; if (attempt < config.retries) await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1))); }
+      } catch (error) {
+        const readable = error instanceof AiRequestError ? error : error instanceof Error && !['TypeError', 'AbortError'].includes(error.name) ? new AiRequestError(error.message, false) : readableFetchError(error, config.timeoutMs);
+        lastError = readable;
+        if (!readable.retryable || attempt >= config.retries) break;
+        await new Promise(resolve => setTimeout(resolve, 400 * (attempt + 1)));
+      }
       finally { clearTimeout(timer); }
     }
     throw lastError instanceof Error ? lastError : new Error('AI 请求失败');
