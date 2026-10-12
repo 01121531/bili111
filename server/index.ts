@@ -126,7 +126,7 @@ app.get('/api/logs/stream', { preHandler: auth }, async (request, reply) => {
 });
 app.get('/api/lotteries', { preHandler: auth }, async (request) => {
   const query = (request.query || {}) as any;
-  return db.listLotteries({ page: Number(query.page) || 1, pageSize: Number(query.pageSize) || 25, accountId: Number(query.accountId) || undefined, source: query.source || undefined, discoveryStatus: query.discoveryStatus || undefined, participationStatus: query.participationStatus || undefined, search: query.search || undefined, from: query.from || undefined, to: query.to || undefined });
+  return db.listLotteries({ page: Number(query.page) || 1, pageSize: Number(query.pageSize) || 25, accountId: Number(query.accountId) || undefined, source: query.source || undefined, discoveryStatus: query.discoveryStatus || undefined, participationStatus: query.participationStatus || undefined, drawTimeSource: query.drawTimeSource || undefined, filterSource: query.filterSource || undefined, search: query.search || undefined, from: query.from || undefined, to: query.to || undefined });
 });
 app.get('/api/lotteries/:id/events', { preHandler: auth }, async (request) => db.listLotteryEvents(parseId((request.params as any).id)));
 app.get('/api/lotteries/:id/participations', { preHandler: auth }, async (request) => {

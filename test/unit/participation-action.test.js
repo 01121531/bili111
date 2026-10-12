@@ -46,7 +46,29 @@ test('前序动作成功而后续动作失败时标记为部分完成', async ()
         const result = await new Monitor(['FollowFeed', 1]).go(option());
         assert.equal(result.code, 4002); assert.equal(result.overallStatus, 'partial');
         assert.equal(result.comment.status, 'success'); assert.equal(result.like.status, 'failed');
-        assert.equal(result.relay.status, 'not_attempted'); assert.match(result.reason, /点赞失败/);
+        assert.equal(result.relay.status, 'success'); assert.match(result.reason, /点赞失败/);
+    } finally {
+        Object.assign(bili, originals); Object.assign(config, originalConfig);
+    }
+});
+
+test('关注失败后仍继续点赞、评论和转发，已点赞记为成功', async () => {
+    const originals = { sendChatWithOcr: bili.sendChatWithOcr, autoAttention: bili.autoAttention, autolike: bili.autolike, autoRelay: bili.autoRelay };
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat, is_not_create_partition: config.is_not_create_partition };
+    config.is_copy_chat = false; config.is_repost_then_chat = false; config.is_not_create_partition = true;
+    const calls = [];
+    bili.sendChatWithOcr = async () => { calls.push('comment'); return 0; };
+    bili.autoAttention = async () => { calls.push('follow'); return 2; };
+    bili.autolike = async () => { calls.push('like'); return 0; };
+    bili.autoRelay = async () => { calls.push('relay'); return 0; };
+    try {
+        const result = await new Monitor(['FollowFeed', 1]).go(option({ uid: ['902'], is_liked: false }));
+        assert.equal(result.overallStatus, 'partial');
+        assert.equal(result.follow.status, 'failed');
+        assert.equal(result.like.status, 'success');
+        assert.equal(result.comment.status, 'success');
+        assert.equal(result.relay.status, 'success');
+        assert.deepEqual(calls, ['comment', 'follow', 'like', 'relay']);
     } finally {
         Object.assign(bili, originals); Object.assign(config, originalConfig);
     }

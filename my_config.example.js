@@ -339,6 +339,8 @@ module.exports = Object.freeze({
          * 屏蔽词
          */
         blockword: ['脚本', '抽奖号', '钓鱼'],
+        /** 屏蔽词匹配模式：literal 普通文字，regex 正则表达式 */
+        blockword_match_mode: 'literal',
 
         /**
          * 转发并评论

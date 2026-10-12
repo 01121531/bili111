@@ -57,6 +57,7 @@ export const configFields: ConfigField[] = [
   toggle('only_followed', 'rules', '只参与已关注账号', '只处理当前已关注用户发起的抽奖。'),
   { key: 'blacklist', category: 'rules', label: '黑名单', description: '动态 ID 或 UID，使用英文逗号分隔。', type: 'textarea' },
   list('blockword', 'rules', '屏蔽词', '正文命中任一词时不参与。'),
+  { key: 'blockword_match_mode', category: 'rules', label: '屏蔽词匹配模式', description: '普通文字模式按原文包含匹配；正则模式兼容原有正则表达式配置。', type: 'select', options: [{ value: 'literal', label: '普通文字（推荐）' }, { value: 'regex', label: '正则表达式' }] },
 
   toggle('is_imitator', 'actions', '监控 UID 直接转发', '对监控 UID 转发的动态不执行关键词判断。'),
   toggle('is_repost_then_chat', 'actions', '转发后使用相同内容评论', '转发附言也会作为评论内容。'),

@@ -68,7 +68,7 @@ export class EngineRunner {
             if (lotteryStatus === 'failed' && !participatedIds.has(dyid)) failedIds.add(dyid);
             this.db.upsertLottery(account.id, {
               dyid, source: String(event.lottery.source || '') || undefined, author: String(event.lottery.author || '') || undefined,
-              description: description || undefined, drawTime,
+              description: description || undefined, drawTime, drawTimeSource: event.lottery.drawTimeSource === undefined ? undefined : String(event.lottery.drawTimeSource || '') || null,
               official: event.lottery.official === undefined ? undefined : Boolean(event.lottery.official), status: String(event.lottery.status || '') || undefined,
               resultReason: event.lottery.resultReason === undefined ? undefined : String(event.lottery.resultReason || ''), url: String(event.lottery.url || '') || undefined,
               sourceCreatedAt, enrichmentStatus: event.lottery.description ? 'complete' : undefined, runId
