@@ -203,6 +203,19 @@ app.post('/api/notifications/email/test', { preHandler: auth }, async (request, 
   try { const result = await notifications.sendTest(); return result?.ok ? result : reply.code(502).send({ error: result?.error || '测试邮件发送失败' }); }
   catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : String(error) }); }
 });
+app.get('/api/accounts/:id/notifications/email', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  try { return notifications.getAccountNotification(id); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+});
+app.put('/api/accounts/:id/notifications/email', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  try { return notifications.saveAccountNotification(id, (request.body || {}) as Record<string, unknown>); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+});
+app.post('/api/accounts/:id/notifications/email/test', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  try { const result = await notifications.sendTest(id); return result?.ok ? result : reply.code(502).send({ error: result?.error || '测试邮件发送失败' }); }
+  catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : String(error) }); }
+});
 app.get('/api/notifications', { preHandler: auth }, async () => db.listNotifications());
 app.get('/api/update/status', { preHandler: auth }, async () => updater.status());
 app.post('/api/update/check', { preHandler: auth }, async (request, reply) => {

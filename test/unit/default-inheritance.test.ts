@@ -45,13 +45,13 @@ test('恢复默认和应用到全部账号只清除业务覆盖并保留 AI', as
   try {
     const first = item.db.createAccount({ uid: '1001', cookie: 'cookie-1' })!;
     const second = item.db.createAccount({ uid: '1002', cookie: 'cookie-2' })!;
-    item.db.setConfig(first.id, { uid_scan_page: 9, ai: { enableJudge: true, commentPrompt: '账号一' } });
+    item.db.setConfig(first.id, { uid_scan_page: 9, ai: { enableJudge: true, commentPrompt: '账号一' }, notifications: { recipient: 'main@example.com' } });
     item.db.setConfig(second.id, { FollowFeed: [9], ai: { enableRelay: true } });
 
-    assert.deepEqual(item.db.resetConfig(first.id), { ai: { enableJudge: true, commentPrompt: '账号一' } });
+    assert.deepEqual(item.db.resetConfig(first.id), { ai: { enableJudge: true, commentPrompt: '账号一' }, notifications: { recipient: 'main@example.com' } });
     const count = item.db.resetAllConfigs();
     assert.equal(count, 2);
-    assert.deepEqual(item.db.getConfig(first.id), { ai: { enableJudge: true, commentPrompt: '账号一' } });
+    assert.deepEqual(item.db.getConfig(first.id), { ai: { enableJudge: true, commentPrompt: '账号一' }, notifications: { recipient: 'main@example.com' } });
     assert.deepEqual(item.db.getConfig(second.id), { ai: { enableRelay: true } });
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });

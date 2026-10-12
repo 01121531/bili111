@@ -112,7 +112,10 @@ export class AppDatabase {
   setConfig(id: number, config: object) { this.run('INSERT INTO account_configs(account_id,config_json,updated_at) VALUES (?,?,?) ON CONFLICT(account_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at', [id, JSON.stringify(config), this.now()]); }
   resetConfig(id: number) {
     const current = this.getConfig(id) as Record<string, unknown>;
-    this.setConfig(id, current.ai ? { ai: current.ai } : {});
+    const next: Record<string, unknown> = {};
+    if (current.ai) next.ai = current.ai;
+    if (current.notifications) next.notifications = current.notifications;
+    this.setConfig(id, next);
     return this.getConfig(id);
   }
   resetAllConfigs() {
@@ -122,7 +125,9 @@ export class AppDatabase {
       for (const row of rows) {
         let current: Record<string, unknown> = {};
         try { current = JSON.parse(row.config_json); } catch { current = {}; }
-        const next = current.ai ? { ai: current.ai } : {};
+        const next: Record<string, unknown> = {};
+        if (current.ai) next.ai = current.ai;
+        if (current.notifications) next.notifications = current.notifications;
         this.db.run('UPDATE account_configs SET config_json=?,updated_at=? WHERE account_id=?', [JSON.stringify(next), this.now(), row.account_id]);
       }
       this.db.run('COMMIT'); this.flush();

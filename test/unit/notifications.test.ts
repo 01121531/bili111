@@ -104,3 +104,37 @@ test('SMTP 连续失败会记录错误但不会抛出到任务链路', async () 
     assert.equal(String(record.error).includes('secret-auth-code'), false);
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
+
+test('账号通知邮箱按账号路由，未配置时继承全局邮箱', async () => {
+  const item = await fixture();
+  const second = item.db.createAccount({ cookie: 'encrypted-cookie-2', uid: '654321', name: '测试账号2', note: '副号' })!;
+  try {
+    item.service.saveAccountNotification(item.account.id, { recipient: 'main@example.com; backup@example.com' });
+    assert.deepEqual(item.service.getAccountNotification(item.account.id), {
+      recipient: 'main@example.com; backup@example.com',
+      configuredRecipient: 'main@example.com; backup@example.com',
+      inherited: false,
+      globalRecipient: 'test@qq.com'
+    });
+    assert.equal(item.service.getAccountNotification(second.id).recipient, 'test@qq.com');
+    await item.service.notifyWins(item.account, [{ source: 'reply', actor: '活动方', content: '主号中奖', url: 'https://www.bilibili.com/opus/1' }], 1);
+    await item.service.notifyWins(second, [{ source: 'reply', actor: '活动方', content: '副号中奖', url: 'https://www.bilibili.com/opus/2' }], 2);
+    assert.equal(item.sent[0].to, 'main@example.com; backup@example.com');
+    assert.equal(item.sent[1].to, 'test@qq.com');
+    await item.service.saveAccountNotification(item.account.id, { recipient: '' });
+    assert.equal(item.service.getAccountNotification(item.account.id).inherited, true);
+    assert.equal(item.service.getAccountNotification(item.account.id).recipient, 'test@qq.com');
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});
+
+test('账号测试邮件使用账号最终收件邮箱且不回显授权码', async () => {
+  const item = await fixture();
+  try {
+    item.service.saveAccountNotification(item.account.id, { recipient: 'account@example.com' });
+    const result = await item.service.sendTest(item.account.id);
+    assert.equal(result?.ok, true);
+    assert.equal(item.sent[0].to, 'account@example.com');
+    assert.doesNotMatch(JSON.stringify(item.sent[0]), /secret-auth-code/);
+    assert.equal(item.db.listNotifications()[0].account_id, item.account.id);
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});

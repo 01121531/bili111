@@ -80,6 +80,15 @@ function buildStatusEmail(account: AccountRow, type: 'account_invalid' | 'accoun
 
 function publicConfig(config: EmailConfig) { const { password, ...safe } = config; return { ...safe, passwordConfigured: Boolean(password) }; }
 
+function splitRecipients(value: string) {
+  return value.split(/[;,]/).map(item => item.trim()).filter(Boolean);
+}
+
+function validRecipientList(value: string) {
+  const recipients = splitRecipients(value);
+  return recipients.length > 0 && recipients.length <= 20 && recipients.every(item => item.length <= 320 && /^\S+@\S+\.\S+$/.test(item));
+}
+
 export class EmailNotificationService {
   constructor(private db: AppDatabase, private transportFactory: TransportFactory = options => createTransport(options as any) as any) {}
 
@@ -89,6 +98,32 @@ export class EmailNotificationService {
     catch { return { ...defaults }; }
   }
   getPublic() { return publicConfig(this.read()); }
+  getAccountNotification(accountId: number) {
+    const account = this.db.getAccount(accountId);
+    if (!account) throw new Error('账号不存在');
+    const globalRecipient = this.read().recipient;
+    let configured = '';
+    try {
+      const value = this.db.getConfig(accountId) as Record<string, any>;
+      configured = typeof value.notifications?.recipient === 'string' ? value.notifications.recipient.trim() : '';
+    } catch { configured = ''; }
+    return { recipient: configured || globalRecipient, configuredRecipient: configured, inherited: !configured, globalRecipient };
+  }
+  saveAccountNotification(accountId: number, input: Record<string, unknown>) {
+    if (!this.db.getAccount(accountId)) throw new Error('账号不存在');
+    const recipient = typeof input.recipient === 'string' ? input.recipient.trim().slice(0, 1000) : '';
+    if (recipient && !validRecipientList(recipient)) throw new Error('账号收件邮箱格式不正确');
+    let current: Record<string, any> = {};
+    try { current = this.db.getConfig(accountId) as Record<string, any>; } catch { current = {}; }
+    const next = { ...current };
+    const notifications = { ...(current.notifications || {}) };
+    if (recipient) notifications.recipient = recipient;
+    else delete notifications.recipient;
+    if (Object.keys(notifications).length) next.notifications = notifications;
+    else delete next.notifications;
+    this.db.setConfig(accountId, next);
+    return this.getAccountNotification(accountId);
+  }
   save(input: Record<string, unknown>) {
     const current = this.read(); const next = normalize(input, current);
     if (typeof input.password === 'string' && input.password.trim()) next.password = input.password.trim();
@@ -99,10 +134,10 @@ export class EmailNotificationService {
     this.db.setSetting('email_notification_config', JSON.stringify(stored));
     return publicConfig(next);
   }
-  private validate(config: EmailConfig) {
+  private validate(config: EmailConfig, recipient = config.recipient) {
     if (!config.smtpHost) throw new Error('请填写 SMTP 主机');
     if (!/^\S+@\S+\.\S+$/.test(config.username)) throw new Error('发件邮箱格式不正确');
-    if (!config.recipient.split(/[;,]/).map(item => item.trim()).filter(Boolean).every(item => /^\S+@\S+\.\S+$/.test(item))) throw new Error('收件邮箱格式不正确');
+    if (!validRecipientList(recipient)) throw new Error('收件邮箱格式不正确');
     if (!config.password) throw new Error('请填写 SMTP 授权码');
   }
   private sanitizeError(error: unknown, config: EmailConfig) {
@@ -111,24 +146,28 @@ export class EmailNotificationService {
     return message.slice(0, 500);
   }
   private async send(eventType: string, content: MailContent, accountId?: number, runId?: number, force = false) {
-    const config = this.read(); if (!force && !config.enabled) return undefined; this.validate(config);
+    const config = this.read(); if (!force && !config.enabled) return undefined;
+    const recipient = accountId ? this.getAccountNotification(accountId).recipient : config.recipient;
+    this.validate(config, recipient);
     const notificationId = this.db.addNotification({ accountId, runId, eventType, title: content.subject, content: content.text });
     const transport = this.transportFactory({ host: config.smtpHost, port: config.smtpPort, secure: config.secure, connectionTimeout: 10000, greetingTimeout: 10000, socketTimeout: 15000, auth: { user: config.username, pass: config.password } });
     let lastError = '';
     try {
       for (let attempt = 1; attempt <= 3; attempt += 1) {
         try {
-          await transport.sendMail({ from: `"B站抽奖助手" <${config.username}>`, to: config.recipient, subject: content.subject, text: content.text, html: content.html });
+          await transport.sendMail({ from: `"B站抽奖助手" <${config.username}>`, to: recipient, subject: content.subject, text: content.text, html: content.html });
           this.db.updateNotification(notificationId, 'success', attempt); return { ok: true, notificationId };
         } catch (error) { lastError = this.sanitizeError(error, config); if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 500)); }
       }
       this.db.updateNotification(notificationId, 'failed', 3, lastError); return { ok: false, notificationId, error: lastError };
     } finally { transport.close?.(); }
   }
-  async sendTest() {
-    const config = this.read(); this.validate(config);
+  async sendTest(accountId?: number) {
+    const config = this.read();
+    const recipient = accountId ? this.getAccountNotification(accountId).recipient : config.recipient;
+    this.validate(config, recipient);
     const subject = '[B站抽奖] 邮件通知测试成功'; const now = displayTime();
-    return this.send('email_test', { subject, text: `${subject}\n发送时间：${now}\nSMTP 配置可正常使用。`, html: layout(subject, 'SMTP 配置可正常使用', `<div style="padding:16px;border-radius:7px;background:#eaf8f2;color:#14805e;line-height:1.8"><strong>连接与发送均正常</strong><br>发送时间：${escapeHtml(now)}</div>`) }, undefined, undefined, true);
+    return this.send('email_test', { subject, text: `${subject}\n发送时间：${now}\nSMTP 配置可正常使用。`, html: layout(subject, 'SMTP 配置可正常使用', `<div style="padding:16px;border-radius:7px;background:#eaf8f2;color:#14805e;line-height:1.8"><strong>连接与发送均正常</strong><br>发送时间：${escapeHtml(now)}</div>`) }, accountId, undefined, true);
   }
   private within(record: { created_at: string } | undefined, milliseconds: number) { return Boolean(record && Date.now() - new Date(record.created_at).getTime() < milliseconds); }
   async notifyInvalid(account: AccountRow, reason: string, runId?: number) {
