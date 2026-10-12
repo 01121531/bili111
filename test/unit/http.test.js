@@ -72,3 +72,22 @@ test('POST 默认不自动重试', async () => {
     });
     assert.equal(calls, 1);
 });
+
+test('表单编码会规范化非法 Unicode，避免 URI malformed', async () => {
+    await withServer((request, response) => {
+        let body = '';
+        request.setEncoding('utf8');
+        request.on('data', chunk => { body += chunk; });
+        request.on('end', () => {
+            assert.equal(body, 'content=bad%EF%BF%BD');
+            response.end('ok');
+        });
+    }, async url => {
+        const result = await request(url, {
+            method: 'POST',
+            contents: { content: 'bad\uD800' },
+            config: { retry: false }
+        });
+        assert.equal(result.ok, true);
+    });
+});
