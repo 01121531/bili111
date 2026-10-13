@@ -2,16 +2,19 @@
 set -u
 
 APP_DIR="/opt/bili-dynamic-lottery"
-REPO="01121531/bili111"
-BRANCH="main"
 SERVICE_NAME="lottery-web.service"
 DATA_DIR="$APP_DIR/data"
 STATE_FILE="$DATA_DIR/update-state.json"
 LOG_FILE="$DATA_DIR/update.log"
 BACKUP_DIR="$DATA_DIR/update-backups/$(date -u +%Y%m%dT%H%M%SZ)"
+PACKAGE_DIR="$DATA_DIR/update-packages"
+PACKAGE_FILE="$PACKAGE_DIR/pending.tar.gz"
+PACKAGE_METADATA="$PACKAGE_DIR/pending.json"
 OLD_COMMIT=""
+OLD_DEPLOYED_COMMIT=""
 NEW_COMMIT=""
-FALLBACK_MODE="false"
+PACKAGE_MODE="false"
+TMP_DIR=""
 
 mkdir -p "$DATA_DIR" "$BACKUP_DIR"
 touch "$LOG_FILE"
@@ -19,23 +22,47 @@ exec >>"$LOG_FILE" 2>&1
 
 log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 
-fetch_origin() {
-  local attempt=1
-  while [ "$attempt" -le 3 ]; do
-    if timeout 180 git -C "$APP_DIR" -c http.version=HTTP/1.1 -c http.lowSpeedLimit=128 -c http.lowSpeedTime=60 fetch origin "$BRANCH"; then
-      return 0
-    fi
-    log "git fetch 第${attempt}次失败"
-    attempt=$((attempt + 1))
-    [ "$attempt" -le 3 ] && sleep 5
-  done
-  return 1
+validate_archive_entries() {
+  local archive="$1"
+  if tar -tzf "$archive" | grep -Eq '(^/|(^|/)\.\.(/|$)|^data(/|$)|^\.git(/|$))'; then
+    return 1
+  fi
 }
 
-github_curl() {
-  curl --fail --silent --show-error --location \
-    --connect-timeout 10 --max-time "$1" \
-    --retry 2 --retry-delay 3 --retry-all-errors "${@:2}"
+deploy_archive() {
+  local archive="$1" source_dir
+  TMP_DIR="$(mktemp -d)"
+  trap 'rm -rf "$TMP_DIR"' EXIT
+  source_dir="$TMP_DIR/source"
+  mkdir -p "$source_dir"
+  validate_archive_entries "$archive" || rollback "发布包包含不允许的路径"
+  tar -xzf "$archive" -C "$source_dir" || rollback "解压发布包失败"
+  [ -f "$source_dir/package.json" ] || rollback "发布包缺少 package.json"
+  [ -f "$source_dir/server/index.ts" ] || rollback "发布包缺少服务端源码"
+  git -C "$APP_DIR" ls-files -z | xargs -0 -r rm -f
+  cp -a "$source_dir"/. "$APP_DIR/"
+  git -C "$APP_DIR" add -A
+  if ! git -C "$APP_DIR" diff --cached --quiet; then
+    git -C "$APP_DIR" -c user.name=lottery-web -c user.email=lottery-web@localhost commit -m "deploy: local package $NEW_COMMIT" || rollback "写入源码快照失败"
+  fi
+}
+
+prepare_local_package() {
+  local values expected_sha expected_size actual_sha actual_size
+  values="$(UPDATE_PACKAGE_METADATA="$PACKAGE_METADATA" node - <<'NODE'
+const fs = require('fs');
+const value = JSON.parse(fs.readFileSync(process.env.UPDATE_PACKAGE_METADATA, 'utf8'));
+if (!/^[a-f0-9]{40}$/i.test(String(value.commit || ''))) process.exit(2);
+if (!/^[a-f0-9]{64}$/i.test(String(value.sha256 || ''))) process.exit(3);
+if (!Number.isSafeInteger(Number(value.size)) || Number(value.size) < 512) process.exit(4);
+process.stdout.write(`${String(value.commit).toLowerCase()} ${String(value.sha256).toLowerCase()} ${Number(value.size)}`);
+NODE
+)" || rollback "发布包元数据无效"
+  read -r NEW_COMMIT expected_sha expected_size <<<"$values"
+  actual_sha="$(sha256sum "$PACKAGE_FILE" | awk '{print $1}')" || rollback "无法校验发布包"
+  actual_size="$(stat -c '%s' "$PACKAGE_FILE")" || rollback "无法读取发布包大小"
+  [ "$actual_sha" = "$expected_sha" ] || rollback "发布包 SHA-256 校验失败"
+  [ "$actual_size" = "$expected_size" ] || rollback "发布包大小校验失败"
 }
 
 wait_for_url() {
@@ -84,41 +111,33 @@ rollback() {
   npm run web:typecheck || true
   npm run web:build || true
   systemctl restart "$SERVICE_NAME" || true
-  write_state failed "$reason" true "$OLD_COMMIT"
+  write_state failed "$reason" true "$OLD_DEPLOYED_COMMIT"
   log "已回滚到 $OLD_COMMIT"
   exit 1
 }
 
-log "开始更新 $REPO@$BRANCH"
+log "开始更新"
 if [ ! -d "$APP_DIR/.git" ]; then rollback "项目目录不是 Git 仓库"; fi
-if [ "$(git -C "$APP_DIR" remote get-url origin 2>/dev/null || true)" != "https://github.com/$REPO.git" ]; then rollback "origin 不是固定目标仓库"; fi
 if [ -n "$(git -C "$APP_DIR" status --porcelain)" ]; then rollback "工作区存在未提交修改"; fi
 
 OLD_COMMIT="$(git -C "$APP_DIR" rev-parse HEAD)"
+OLD_DEPLOYED_COMMIT="$(UPDATE_STATE_FILE="$STATE_FILE" UPDATE_OLD_COMMIT="$OLD_COMMIT" node - <<'NODE'
+const fs = require('fs');
+let value = {};
+try { value = JSON.parse(fs.readFileSync(process.env.UPDATE_STATE_FILE, 'utf8')); } catch {}
+const deployed = String(value.deployedCommit || '');
+process.stdout.write(/^[a-f0-9]{40}$/i.test(deployed) ? deployed : process.env.UPDATE_OLD_COMMIT);
+NODE
+)"
 write_state running "" false
 cp -f "$DATA_DIR/lottery.db" "$BACKUP_DIR/lottery.db" 2>/dev/null || true
 cp -f "$DATA_DIR/.encryption-key" "$BACKUP_DIR/.encryption-key" 2>/dev/null || true
 
-if fetch_origin; then
-  NEW_COMMIT="$(git -C "$APP_DIR" rev-parse "origin/$BRANCH")"
-  if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
-  git -C "$APP_DIR" reset --hard "$NEW_COMMIT" || rollback "切换到新版本失败"
-else
-  log "git fetch 不可用，使用固定仓库 codeload 快照"
-  TMP_DIR="$(mktemp -d)"
-  trap 'rm -rf "$TMP_DIR"' EXIT
-  NEW_COMMIT="$(github_curl 60 "https://api.github.com/repos/$REPO/commits/$BRANCH" | node -e 'let s="";process.stdin.on("data",c=>s+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(s).sha));')" || rollback "获取 GitHub commit 失败"
-  if [ "$OLD_COMMIT" = "$NEW_COMMIT" ]; then write_state success "" false "$OLD_COMMIT"; log "已经是最新版本"; exit 0; fi
-  github_curl 600 "https://codeload.github.com/$REPO/tar.gz/$NEW_COMMIT" -o "$TMP_DIR/source.tar.gz" || rollback "下载 GitHub 源码失败"
-  tar -xzf "$TMP_DIR/source.tar.gz" -C "$TMP_DIR" || rollback "解压 GitHub 源码失败"
-  SOURCE_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -1)"
-  [ -n "$SOURCE_DIR" ] || rollback "GitHub 源码目录为空"
-  git -C "$APP_DIR" ls-files -z | xargs -0 -r rm -f
-  cp -a "$SOURCE_DIR"/. "$APP_DIR/"
-  git -C "$APP_DIR" add -A
-  git -C "$APP_DIR" commit -m "deploy: GitHub $BRANCH $NEW_COMMIT" || rollback "写入源码快照失败"
-  FALLBACK_MODE="true"
-fi
+if [ ! -f "$PACKAGE_FILE" ] || [ ! -f "$PACKAGE_METADATA" ]; then rollback "未找到本地发布包，请先在控制台上传"; fi
+PACKAGE_MODE="true"
+prepare_local_package
+log "使用本地上传发布包: $NEW_COMMIT"
+deploy_archive "$PACKAGE_FILE"
 
 cd "$APP_DIR" || rollback "无法进入项目目录"
 npm ci --no-audit --no-fund || rollback "安装依赖失败"
@@ -131,4 +150,8 @@ wait_for_url http://127.0.0.1:8080/ || rollback "8080 代理检查失败"
 test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' http://127.0.0.1:6666/api/auth/me)" = "401" || rollback "未登录鉴权检查失败"
 
 write_state success "" false "$NEW_COMMIT"
+if [ "$PACKAGE_MODE" = "true" ]; then
+  mv -f "$PACKAGE_FILE" "$BACKUP_DIR/release.tar.gz"
+  mv -f "$PACKAGE_METADATA" "$BACKUP_DIR/release.json"
+fi
 log "更新成功: $NEW_COMMIT"

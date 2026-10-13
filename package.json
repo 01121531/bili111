@@ -17,6 +17,7 @@
     "web:build": "vite build --config web/vite.config.ts",
     "web:start": "tsx server/index.ts",
     "web:typecheck": "tsc --noEmit",
+    "deploy:package": "node script/build/deploy-package.mjs",
     "pkg": "bash script/build/pkg.sh",
     "changelog": "bash script/build/changelog.sh",
     "lint": "npx eslint lib/ test/ *.js",

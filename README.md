@@ -72,9 +72,19 @@ systemctl enable --now lottery-web.service
 lottery-web ALL=(root) NOPASSWD: /usr/local/sbin/lottery-web-update
 ```
 
-### 在线更新
+### 本地发布包更新（国内服务器推荐）
 
-登录控制台后打开“系统更新”，手动检查 `01121531/bili111` 的 `main` 分支，再确认执行更新。更新脚本会备份 `data/lottery.db` 和 `data/.encryption-key`，安装依赖、类型检查、构建前端并重启服务；失败时自动恢复旧 commit 和数据备份。更新源、仓库、分支和命令均由服务器固定配置，网页端不能修改。
+服务器无法稳定访问 GitHub 时，在开发电脑完成测试和提交后生成发布包：
+
+```bash
+npm run deploy:package
+```
+
+命令会在 `dist/deploy/` 生成带完整 Git 提交号的 `.tar.gz` 文件和 SHA-256 清单。登录控制台“系统更新”，上传 `.tar.gz` 后执行“立即更新”。服务器只读取已上传的本地包，不需要连接 GitHub；固定脚本仍会备份数据、校验发布包、安装依赖、构建、重启、健康检查，并在失败时自动回滚。
+
+发布包由 `git archive` 生成，只包含 Git 已跟踪源码，不包含 `data/`、Cookie、数据库、加密密钥、SMTP 授权码或 AI Key。
+
+服务器更新接口和固定脚本不会访问 GitHub；未上传发布包时会直接拒绝更新。更新脚本会备份 `data/lottery.db` 和 `data/.encryption-key`，安装依赖、类型检查、构建前端并重启服务；失败时自动恢复旧版本和数据备份。
 
 不要将 `node_modules`、`data/lottery.db`、`data/.encryption-key`、Cookie、管理员密码或 GitHub Token 提交到 Git。服务器安装固定脚本可参考 [`deploy/lottery-web-update`](deploy/lottery-web-update)。
 

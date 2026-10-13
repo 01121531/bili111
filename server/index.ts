@@ -35,6 +35,7 @@ const qrSessions = new Map<string, { key: string; expires: number }>();
 
 await app.register(cookie);
 await app.register(cors, { origin: true, credentials: true });
+app.addContentTypeParser(['application/gzip', 'application/octet-stream'], { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
 
 async function auth(request: any, reply: any) { if (!sessions.has(request.cookies.admin_session)) return reply.code(401).send({ error: '未登录' }); }
 function publicAccount(account: any) { if (!account) return account; const { cookie: _cookie, ...safe } = account; return { ...safe, profile: safe.profile_json ? JSON.parse(safe.profile_json) : null }; }
@@ -221,8 +222,14 @@ app.post('/api/accounts/:id/notifications/email/test', { preHandler: auth }, asy
 });
 app.get('/api/notifications', { preHandler: auth }, async () => db.listNotifications());
 app.get('/api/update/status', { preHandler: auth }, async () => updater.status());
+app.post('/api/update/package', { preHandler: auth, bodyLimit: 50 * 1024 * 1024 }, async (request, reply) => {
+  try {
+    if (!Buffer.isBuffer(request.body)) return reply.code(400).send({ error: '发布包格式无效' });
+    return updater.uploadPackage(request.body, (request.query as any)?.commit);
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+});
 app.post('/api/update/check', { preHandler: auth }, async (request, reply) => {
-  try { return await updater.check(); } catch (error) { return reply.code(502).send({ error: String(error) }); }
+  try { return await updater.check(); } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
 });
 app.post('/api/update/apply', { preHandler: auth }, async (request, reply) => {
   try { return updater.apply(); } catch (error) { return reply.code(409).send({ error: String(error) }); }
