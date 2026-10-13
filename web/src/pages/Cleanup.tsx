@@ -20,7 +20,7 @@ export function CleanupPage({ accounts, onNotify }: AnyObject) {
   const [draft, setDraft] = useState<AnyObject>({});
   const [schedule, setSchedule] = useState<AnyObject>({ cron: '0 3 * * *', enabled: false });
   const [busy, setBusy] = useState(false);
-  const [watchedJobId, setWatchedJobId] = useState<number | null>(null);
+  const [watchedJobIds, setWatchedJobIds] = useState<number[]>([]);
   const [result, setResult] = useState<AnyObject | null>(null);
   const [recentRuns, setRecentRuns] = useState<AnyObject[]>([]);
 
@@ -37,17 +37,32 @@ export function CleanupPage({ accounts, onNotify }: AnyObject) {
 
   useEffect(() => { void load().catch(error => onNotify(error.message)); }, [scope, accountId]);
   useEffect(() => {
-    if (!watchedJobId) return;
+    if (!watchedJobIds.length) return;
     let stopped = false;
     const poll = async () => {
       try {
         const [jobs, runs] = await Promise.all([api<AnyObject[]>('/api/jobs'), api<AnyObject[]>('/api/runs')]);
-        const job = jobs.find(item => Number(item.id) === watchedJobId);
-        const run = runs.find(item => Number(item.job_id) === watchedJobId);
-        if (run) setResult(await api<AnyObject>(`/api/runs/${run.id}/cleanup`));
-        if (job && ['success', 'failed', 'cancelled', 'skipped'].includes(job.status)) {
-          setWatchedJobId(null); setBusy(false); setRecentRuns(runs.filter(item => ['clear', 'clear_preview'].includes(item.type) && (scope === 'default' || Number(item.account_id) === Number(accountId))).slice(0, 8));
-          onNotify(job.status === 'success' ? `${taskText[job.type] || '清理任务'}已完成` : `${taskText[job.type] || '清理任务'}失败，请查看明细`);
+        const watched = jobs.filter(item => watchedJobIds.includes(Number(item.id)));
+        const watchedRuns = runs.filter(item => watchedJobIds.includes(Number(item.job_id)) && item.status !== 'running');
+        if (watchedRuns.length) {
+          const details = await Promise.all(watchedRuns.map(run => api<AnyObject>(`/api/runs/${run.id}/cleanup`)));
+          const merged = details.length === 1 ? details[0] : {
+            summary: details.reduce((summary, detail) => {
+              const next = { ...summary };
+              for (const key of ['scanned_count', 'relevant_count', 'active_count', 'expired_count', 'protected_up_count', 'delete_candidate_count', 'delete_success_count', 'delete_failed_count', 'unfollow_candidate_count', 'unfollow_success_count', 'unfollow_failed_count']) next[key] = (Number(next[key]) || 0) + (Number(detail.summary?.[key]) || 0);
+              next.preview = details.every(item => Boolean(item.summary?.preview));
+              next.threshold_days = detail.summary?.threshold_days || next.threshold_days;
+              return next;
+            }, {} as AnyObject),
+            records: details.flatMap(detail => detail.records || [])
+          };
+          setResult(merged);
+        }
+        const finished = watched.length === watchedJobIds.length && watched.every(item => ['success', 'failed', 'cancelled', 'skipped'].includes(item.status));
+        if (finished) {
+          setWatchedJobIds([]); setBusy(false); setRecentRuns(runs.filter(item => ['clear', 'clear_preview'].includes(item.type) && (scope === 'default' || Number(item.account_id) === Number(accountId))).slice(0, 8));
+          const failed = watched.filter(item => item.status !== 'success').length;
+          onNotify(failed ? `${failed} 个开奖清理任务失败，请查看明细` : `${watched.length > 1 ? `${watched.length} 个账号的` : ''}开奖清理已完成`);
           return;
         }
       } catch (error) { if (!stopped) onNotify((error as Error).message); }
@@ -55,7 +70,7 @@ export function CleanupPage({ accounts, onNotify }: AnyObject) {
     };
     void poll();
     return () => { stopped = true; };
-  }, [watchedJobId]);
+  }, [watchedJobIds]);
 
   function update(key: string, value: unknown) { setDraft(current => ({ ...current, [key]: value })); }
 
@@ -92,14 +107,20 @@ export function CleanupPage({ accounts, onNotify }: AnyObject) {
   }
 
   async function start(preview: boolean) {
-    if (!accountId) { onNotify('请切换到单账号设置并选择账号'); return; }
-    if (!preview && !window.confirm(`确定对当前账号执行开奖清理吗？系统会重新扫描，并删除超过 ${draft.clear_max_day || 30} 天的转发动态。`)) return;
+    const allAccounts = scope === 'default';
+    if (!allAccounts && !accountId) { onNotify('请选择执行账号'); return; }
+    const targetText = allAccounts ? `全部 ${accounts.length} 个启用账号` : '当前账号';
+    if (!preview && !window.confirm(`确定对${targetText}执行开奖清理吗？系统会重新扫描，并删除超过 ${draft.clear_max_day || 30} 天的转发动态。`)) return;
     setBusy(true); setResult(null);
     try {
-      const response = preview
-        ? await api<AnyObject>(`/api/accounts/${accountId}/cleanup/preview`, { method: 'POST' })
-        : { job: await api<AnyObject>(`/api/accounts/${accountId}/jobs`, { method: 'POST', body: JSON.stringify({ type: 'clear' }) }) };
-      setWatchedJobId(Number(response.job?.id)); onNotify(preview ? '清理预览已加入串行队列' : '开奖清理已加入串行队列');
+      const response = allAccounts
+        ? await api<AnyObject>(preview ? '/api/cleanup/preview' : '/api/cleanup/run', { method: 'POST' })
+        : preview
+          ? { jobs: [await api<AnyObject>(`/api/accounts/${accountId}/cleanup/preview`, { method: 'POST' }).then(value => value.job)] }
+          : { jobs: [await api<AnyObject>(`/api/accounts/${accountId}/jobs`, { method: 'POST', body: JSON.stringify({ type: 'clear' }) })] };
+      const ids = (response.jobs || []).map((job: AnyObject) => Number(job?.id)).filter((id: number) => Number.isInteger(id) && id > 0);
+      if (!ids.length) { setBusy(false); onNotify(response.reason || '没有可执行的账号'); return; }
+      setWatchedJobIds(ids); onNotify(preview ? `${allAccounts ? `全部 ${ids.length} 个账号` : '清理'}预览已加入串行队列` : `${allAccounts ? `全部 ${ids.length} 个账号` : '开奖清理'}已加入串行队列`);
     } catch (error) { setBusy(false); onNotify((error as Error).message); }
   }
 
@@ -124,9 +145,9 @@ export function CleanupPage({ accounts, onNotify }: AnyObject) {
           <div className="cleanup-schedule"><div className="cleanup-schedule-toggle"><div><strong>自动开奖清理</strong><p>{scope === 'default' ? '所有继承账号使用此计划' : schedule.inherited ? '当前账号继承默认计划' : '当前账号独立计划'}</p></div><Toggle checked={Boolean(schedule.enabled)} onChange={enabled => setSchedule((value: AnyObject) => ({ ...value, enabled }))} /></div><label>Cron 表达式<input value={schedule.cron || '0 3 * * *'} onChange={event => setSchedule((value: AnyObject) => ({ ...value, cron: event.target.value }))} /><small>五段格式，时区固定为 Asia/Shanghai。</small></label><div className="cleanup-next"><Clock3 size={18} /><div><span>下次执行</span><strong>{schedule.enabled ? formatDate(schedule.next_run_at) : '定时任务已关闭'}</strong></div></div><button className="button secondary full" onClick={saveSchedule} disabled={busy}><Save size={17} />保存定时计划</button></div>
         </Panel>
       </section>
-      <Panel title="预览与执行" subtitle="预览和执行均针对上方选定账号；预览不会删除动态或取消关注，真实执行前会重新扫描。">
-        <div className="cleanup-actions"><div><ShieldCheck size={22} /><p>扫描失败时任务立即中止，任何写操作都不会发生。关注分组读取失败时仅跳过取关。</p></div><div className="button-row"><button className="button secondary" onClick={() => start(true)} disabled={busy || !accountId}><Eye size={17} />预览清理结果</button><button className="button primary" onClick={() => start(false)} disabled={busy || !accountId}><Trash2 size={17} />立即执行清理</button></div></div>
-        {busy && watchedJobId && <div className="info-banner"><RefreshCw size={18} className="spin" /><div><strong>任务正在串行队列中运行</strong><p>任务 #{watchedJobId}，完成后本页会自动展示结果。</p></div></div>}
+      <Panel title="预览与执行" subtitle={scope === 'default' ? '默认规则会按每个启用账号的生效配置执行；预览和执行均覆盖全部启用账号。' : '预览和执行针对上方选定账号；预览不会删除动态或取消关注，真实执行前会重新扫描。'}>
+        <div className="cleanup-actions"><div><ShieldCheck size={22} /><p>扫描失败时任务立即中止，任何写操作都不会发生。关注分组读取失败时仅跳过取关。</p></div><div className="button-row"><button className="button secondary" onClick={() => start(true)} disabled={busy || (scope === 'account' && !accountId)}><Eye size={17} />{scope === 'default' ? '预览全部账号' : '预览清理结果'}</button><button className="button primary" onClick={() => start(false)} disabled={busy || (scope === 'account' && !accountId)}><Trash2 size={17} />{scope === 'default' ? '清理全部账号' : '立即执行清理'}</button></div></div>
+        {busy && watchedJobIds.length > 0 && <div className="info-banner"><RefreshCw size={18} className="spin" /><div><strong>任务正在串行队列中运行</strong><p>{watchedJobIds.length > 1 ? `已提交 ${watchedJobIds.length} 个账号任务，完成后本页会汇总展示结果。` : `任务 #${watchedJobIds[0]}，完成后本页会自动展示结果。`}</p></div></div>}
       </Panel>
       {summary && <><section className="cleanup-metrics"><div><span>扫描动态</span><strong>{metric(summary, 'scanned_count')}</strong></div><div><span>推定已开奖</span><strong>{metric(summary, 'expired_count')}</strong></div><div><span>删除成功</span><strong>{metric(summary, 'delete_success_count')}</strong></div><div><span>取关成功</span><strong>{metric(summary, 'unfollow_success_count')}</strong></div></section><Panel title={summary.preview ? '预览结果' : '执行结果'} subtitle={`推定开奖阈值：${summary.threshold_days} 天${summary.unfollow_blocked_reason ? `；取关已跳过：${summary.unfollow_blocked_reason}` : ''}`}><div className="cleanup-records">{(result.records || []).map((item: AnyObject) => <div key={item.id}><span className={`cleanup-action-icon ${item.action}`} >{item.action === 'dynamic_delete' ? <Trash2 size={17} /> : item.action === 'unfollow' ? <UserMinus size={17} /> : <ShieldCheck size={17} />}</span><div><strong>{item.action === 'dynamic_delete' ? `动态 ${item.target_id}` : item.action === 'unfollow' ? `UP 主 ${item.target_id}` : item.target_id}</strong><p>{item.reason || '无补充说明'}</p><small>{item.dynamic_created_at ? `发布于 ${formatDate(item.dynamic_created_at * 1000)} · ` : ''}{item.inferred_expired_at ? `推定开奖 ${formatDate(item.inferred_expired_at * 1000)}` : ''}</small></div><StatusPill status={item.status}>{item.status === 'candidate' ? '候选' : item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '已跳过'}</StatusPill></div>)}{!(result.records || []).length && <EmptyState title="本次没有需要处理的动态或关注" />}</div></Panel></>}
       <Panel title="最近清理任务" subtitle="预览与真实执行均保留审计记录。"><div className="responsive-table"><table><thead><tr><th>账号</th><th>任务</th><th>状态</th><th>开始时间</th><th>结果</th></tr></thead><tbody>{recentRuns.map(run => <tr key={run.id} onClick={() => openRun(run.id)} className="clickable-row"><td data-label="账号">{run.account_name || `账号 ${run.account_id}`}</td><td data-label="任务">{taskText[run.type] || run.type}</td><td data-label="状态"><StatusPill status={run.status} /></td><td data-label="开始时间">{formatDate(run.started_at)}</td><td data-label="结果">扫描 {run.discovered_count || 0} · 候选 {run.candidate_count || 0} · 成功 {run.success_count || 0} · 失败 {run.failed_count || 0}</td></tr>)}</tbody></table>{!recentRuns.length && <EmptyState title="还没有开奖清理任务" description="先选择账号进行一次只读预览。" />}</div></Panel>

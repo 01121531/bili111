@@ -136,6 +136,16 @@ app.post('/api/accounts/:id/cleanup/preview', { preHandler: auth }, async (reque
   const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
   return { accepted: true, job: scheduler.enqueue(id, 'clear_preview') };
 });
+app.post('/api/cleanup/preview', { preHandler: auth }, async () => {
+  const accounts = db.listAccounts().filter(account => account.enabled);
+  const jobs = accounts.map(account => scheduler.enqueue(account.id, 'clear_preview'));
+  return { accepted: jobs.length > 0, jobs, accountCount: accounts.length, reason: jobs.length ? undefined : '没有启用的账号' };
+});
+app.post('/api/cleanup/run', { preHandler: auth }, async () => {
+  const accounts = db.listAccounts().filter(account => account.enabled);
+  const jobs = accounts.map(account => scheduler.enqueue(account.id, 'clear'));
+  return { accepted: jobs.length > 0, jobs, accountCount: accounts.length, reason: jobs.length ? undefined : '没有启用的账号' };
+});
 app.get('/api/accounts/:id/comment-backfill/status', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return db.commentBackfillStats(id); });
 app.post('/api/accounts/:id/comment-backfill/preview', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const limit = Math.min(100, Math.max(1, Number((request.body as any)?.limit) || 20)); return { items: db.listCommentBackfillCandidates(id, limit).map(item => ({ dyid: item.dyid, author: item.author, description: item.description, url: item.url, originalParticipatedAt: item.finished_at, commentSource: '当前账号评论配置' })), limit }; });
 app.post('/api/accounts/:id/comment-backfill', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const limit = Math.min(100, Math.max(1, Number((request.body as any)?.limit) || 20)); const candidates = db.listCommentBackfillCandidates(id, limit); if (!candidates.length) return { accepted: false, reason: '没有待补充评论的参与记录', pending: 0 }; return { accepted: true, limit, job: scheduler.enqueue(id, 'comment_backfill', { limit }) }; });
