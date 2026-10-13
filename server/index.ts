@@ -21,6 +21,19 @@ async function bootstrap() {
 const app = Fastify({ logger: false });
 const db = await AppDatabase.create();
 function readGlobalConfig() { try { return JSON.parse(db.getSetting('global_config') || '{}') as Record<string, unknown>; } catch { return {}; } }
+function migrateLegacyCleanupDays() {
+  const globalConfig = readGlobalConfig();
+  if (Object.prototype.hasOwnProperty.call(globalConfig, 'clear_max_day') && Number(globalConfig.clear_max_day) < 1) {
+    globalConfig.clear_max_day = 30; db.setSetting('global_config', JSON.stringify(globalConfig));
+  }
+  for (const account of db.listAccounts()) {
+    const accountConfig = db.getConfig(account.id) as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(accountConfig, 'clear_max_day') && Number(accountConfig.clear_max_day) < 1) {
+      accountConfig.clear_max_day = 30; db.setConfig(account.id, accountConfig);
+    }
+  }
+}
+migrateLegacyCleanupDays();
 try { const normalized = diffFromDefaults(readGlobalConfig()).diff; db.setSetting('global_config', JSON.stringify(normalized)); }
 catch { db.setSetting('global_config', '{}'); }
 const ai = new AiService(db);
@@ -40,6 +53,27 @@ app.addContentTypeParser(['application/gzip', 'application/octet-stream'], { par
 async function auth(request: any, reply: any) { if (!sessions.has(request.cookies.admin_session)) return reply.code(401).send({ error: '未登录' }); }
 function publicAccount(account: any) { if (!account) return account; const { cookie: _cookie, ...safe } = account; return { ...safe, profile: safe.profile_json ? JSON.parse(safe.profile_json) : null }; }
 function parseId(value: string) { const id = Number(value); if (!Number.isInteger(id) || id < 1) throw new Error('无效 ID'); return id; }
+const cleanupKeys = ['clear_max_day', 'clear_partition', 'clear_white_list', 'clear_remove_dynamic', 'clear_remove_attention', 'clear_remove_delay'] as const;
+function cleanupPayload(scope: 'default' | 'account', accountId?: number) {
+  const inherited = readGlobalConfig();
+  const override = scope === 'account' && accountId ? db.getConfig(accountId) as Record<string, unknown> : inherited;
+  const payload = publicConfigPayload(override, scope === 'account' ? inherited : {}, scope);
+  const pick = (value: Record<string, any>) => Object.fromEntries(cleanupKeys.map(key => [key, value[key]]));
+  const schedules = scope === 'account' && accountId ? accountSchedules.listAccount(accountId) : accountSchedules.listDefaults();
+  return {
+    scope,
+    inherited: scope === 'account' ? !cleanupKeys.some(key => Object.prototype.hasOwnProperty.call(override, key)) : false,
+    effective: pick(payload.effective),
+    overrides: pick(payload.overrides),
+    defaults: pick(payload.defaults),
+    schedule: schedules.find(item => item.type === 'clear') || null
+  };
+}
+function cleanupInput(body: any) {
+  const result: Record<string, unknown> = {};
+  for (const key of cleanupKeys) if (body?.[key] !== undefined) result[key] = body[key];
+  return result;
+}
 
 app.post('/api/auth/login', async (request, reply) => {
   const body = request.body as { password?: string };
@@ -72,6 +106,36 @@ app.post('/api/accounts/qr/start', { preHandler: auth }, async () => { const qr 
 app.post('/api/accounts/qr/:sessionId/poll', { preHandler: auth }, async (request, reply) => { const session = qrSessions.get((request.params as any).sessionId); if (!session || session.expires < Date.now()) return reply.code(410).send({ status: 'expired' }); const result = await pollQrSession(session.key); if (result.status === 'success' && result.rawCookie) { const verified = await verifyBiliCookie(result.rawCookie); if (!verified.ok) return reply.code(verified.kind === 'invalid' ? 400 : 502).send(verified); const row = db.createAccount({ cookie: encrypt(result.rawCookie), uid: verified.profile.uid, name: verified.profile.name, profile: verified.profile }); accountSchedules.ensureAccount(row!.id); qrSessions.delete((request.params as any).sessionId); return { ...result, rawCookie: undefined, account: publicAccount(row) }; } return { ...result, rawCookie: undefined }; });
 
 app.post('/api/accounts/:id/jobs', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const type = (request.body as any)?.type || 'start'; if (!['start', 'discover', 'check', 'clear', 'account', 'comment_backfill'].includes(type)) return reply.code(400).send({ error: '不支持的任务类型' }); return scheduler.enqueue(id, type); });
+app.get('/api/cleanup/config', { preHandler: auth }, async () => cleanupPayload('default'));
+app.put('/api/cleanup/config', { preHandler: auth }, async (request, reply) => {
+  try {
+    const current = publicConfigPayload(readGlobalConfig(), {}, 'default').effective as Record<string, unknown>;
+    const { diff } = diffFromDefaults({ ...current, ...cleanupInput(request.body) });
+    db.setSetting('global_config', JSON.stringify(diff));
+    return cleanupPayload('default');
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : '清理配置无效' }); }
+});
+app.get('/api/accounts/:id/cleanup/config', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return cleanupPayload('account', id);
+});
+app.put('/api/accounts/:id/cleanup/config', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  try {
+    const inherited = readGlobalConfig(); const existing = db.getConfig(id) as Record<string, unknown>;
+    const current = publicConfigPayload(existing, inherited, 'account').effective as Record<string, unknown>;
+    const { diff } = diffFromBase({ ...current, ...cleanupInput(request.body) }, inherited);
+    if (existing.ai) diff.ai = existing.ai; if (existing.notifications) diff.notifications = existing.notifications;
+    db.setConfig(id, diff); return cleanupPayload('account', id);
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : '账号清理配置无效' }); }
+});
+app.post('/api/accounts/:id/cleanup/config/reset', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  const current = db.getConfig(id) as Record<string, unknown>; for (const key of cleanupKeys) delete current[key]; db.setConfig(id, current); return cleanupPayload('account', id);
+});
+app.post('/api/accounts/:id/cleanup/preview', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  return { accepted: true, job: scheduler.enqueue(id, 'clear_preview') };
+});
 app.get('/api/accounts/:id/comment-backfill/status', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return db.commentBackfillStats(id); });
 app.post('/api/accounts/:id/comment-backfill/preview', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const limit = Math.min(100, Math.max(1, Number((request.body as any)?.limit) || 20)); return { items: db.listCommentBackfillCandidates(id, limit).map(item => ({ dyid: item.dyid, author: item.author, description: item.description, url: item.url, originalParticipatedAt: item.finished_at, commentSource: '当前账号评论配置' })), limit }; });
 app.post('/api/accounts/:id/comment-backfill', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const limit = Math.min(100, Math.max(1, Number((request.body as any)?.limit) || 20)); const candidates = db.listCommentBackfillCandidates(id, limit); if (!candidates.length) return { accepted: false, reason: '没有待补充评论的参与记录', pending: 0 }; return { accepted: true, limit, job: scheduler.enqueue(id, 'comment_backfill', { limit }) }; });
@@ -109,6 +173,9 @@ app.get('/api/runs/:id', { preHandler: auth }, async (request, reply) => { const
 app.get('/api/runs/:id/participations', { preHandler: auth }, async (request) => {
   const query = (request.query || {}) as any;
   return db.listRunParticipations(parseId((request.params as any).id), { page: Number(query.page) || 1, pageSize: Number(query.pageSize) || 25, status: query.status || undefined, search: query.search || undefined });
+});
+app.get('/api/runs/:id/cleanup', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getRun(id)) return reply.code(404).send({ error: '运行记录不存在' }); return db.getRunCleanup(id);
 });
 app.get('/api/runs/:id/logs', { preHandler: auth }, async (request) => {
   const query = (request.query || {}) as any;

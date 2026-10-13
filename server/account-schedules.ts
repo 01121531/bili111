@@ -9,7 +9,7 @@ export type ScheduleTemplate = Record<ScheduleJobType, { cron: string; enabled: 
 export const builtInScheduleDefaults: ScheduleTemplate = {
   start: { cron: '0 */6 * * *', enabled: false },
   check: { cron: '*/30 * * * *', enabled: false },
-  clear: { cron: '0 3 * * 0', enabled: false },
+  clear: { cron: '0 3 * * *', enabled: false },
   account: { cron: '0 8 * * *', enabled: false }
 };
 
@@ -81,7 +81,9 @@ export class AccountScheduleService {
   stop() { clearInterval(this.timer); }
 
   private normalizeStoredDefaults() {
-    this.db.setSetting('default_account_schedules', JSON.stringify(this.getDefaults()));
+    const defaults = this.getDefaults();
+    if (!defaults.clear.enabled && defaults.clear.cron === '0 3 * * 0') defaults.clear.cron = builtInScheduleDefaults.clear.cron;
+    this.db.setSetting('default_account_schedules', JSON.stringify(defaults));
   }
 
   private syncInherited(forceAll: boolean) {

@@ -118,9 +118,9 @@ async function main() {
                     break;
                 case 'clear':
                     if (CLEAR) {
-                        log.info('清理动态', '开始运行');
+                        log.info('开奖清理', process.env.CLEAR_PREVIEW === '1' ? '开始只读预览' : '开始运行');
                         loop_wait = clear_loop_wait;
-                        await clear();
+                        await clear({ preview: process.env.CLEAR_PREVIEW === '1' });
                     }
                     break;
                 case 'login':

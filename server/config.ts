@@ -99,14 +99,12 @@ export const configFields: ConfigField[] = [
   number('check_session_pages', 'winning', '私信扫描页数', '每次中奖检测最多读取的私信页数。', 1, 100, '页'),
 
   { key: 'clear_white_list', category: 'cleanup', label: '清理白名单', description: 'UID 或动态 ID，使用英文逗号分隔。', type: 'textarea' },
-  { key: 'clear_partition', category: 'cleanup', label: '清理关注分组', description: '关注分组 ID，可使用英文逗号分隔。', type: 'text' },
-  number('clear_max_day', 'cleanup', '保留最近记录', '只清理指定天数以前的动态或关注。', 0, 3650, '天'),
-  toggle('clear_quick_remove_attention', 'cleanup', '快速移除关注', '不执行额外判断，直接按条件取关。'),
-  number('clear_quick_remove_attention_fans_number_smallest', 'cleanup', '快速取关粉丝数上限', '只移除粉丝数低于该值的关注。', 0, 100000000, '人', true),
-  toggle('clear_remove_dynamic', 'cleanup', '清理动态', '删除符合条件的历史动态。'),
-  toggle('clear_remove_attention', 'cleanup', '清理关注', '移除符合条件的临时关注。'),
+  { key: 'clear_partition', category: 'cleanup', label: '抽奖关注分组', description: '只会从这些 B 站关注分组中取消关注，可使用英文逗号分隔多个分组名称。', type: 'text' },
+  number('clear_max_day', 'cleanup', '推定开奖天数', '账号转发动态发布后经过这些天数，推定为已经开奖并允许清理。', 1, 3650, '天'),
+  toggle('clear_remove_dynamic', 'cleanup', '删除过期转发动态', '删除超过推定开奖天数的账号转发动态。'),
+  toggle('clear_remove_attention', 'cleanup', '取消无进行中抽奖的关注', '仅处理抽奖关注分组中、已无进行中参与动态的 UP 主。'),
   number('clear_remove_delay', 'cleanup', '清理操作间隔', '每次删除或取关之间的等待时间。', 0, 600000, '毫秒'),
-  list('clear_dynamic_type', 'cleanup', '清理动态类型', '只清理这些类型的动态。', true),
+  list('clear_dynamic_type', 'cleanup', '清理动态类型', '默认仅清理类型 1（转发动态）；网页清理页面不会删除原创动态。', true),
 
   { key: 'is_exception', category: 'advanced', label: '运行异常标记', description: '由运行时维护，不建议手动修改。', type: 'boolean', readOnly: true },
   { key: 'is_outof_maxfollow', category: 'advanced', label: '关注已达上限', description: '由运行时维护，不建议手动修改。', type: 'boolean', readOnly: true }

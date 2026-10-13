@@ -46,7 +46,7 @@ export async function getDynamicDetail(cookie: string, dyid: string) {
     const item = wrapper?.type === 'DYNAMIC_TYPE_FORWARD' && wrapper?.orig?.id_str ? wrapper.orig : wrapper;
     const nodes = item?.modules?.module_dynamic?.desc?.rich_text_nodes || item?.modules?.module_dynamic?.major?.opus?.summary?.rich_text_nodes || [];
     return { ok: true as const, detail: {
-      dyid: String(item.id_str || dyid), author: String(item?.modules?.module_author?.name || ''), description: dynamicText(item),
+      dyid: String(item.id_str || dyid), author: String(item?.modules?.module_author?.name || ''), authorUid: String(item?.modules?.module_author?.mid || '') || null, description: dynamicText(item),
       official: nodes.some((node: any) => node?.type === 'RICH_TEXT_NODE_TYPE_LOTTERY'), sourceCreatedAt: Number(item?.modules?.module_author?.pub_ts || 0) || null,
       url: `https://t.bilibili.com/${String(item.id_str || dyid)}`
     } };
