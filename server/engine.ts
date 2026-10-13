@@ -14,7 +14,7 @@ export class EngineRunner {
   processes = new Map<number, ChildProcessWithoutNullStreams>();
   constructor(private db: AppDatabase, private emit: (event: object) => void, private ai: AiService, private notifications: EmailNotificationService) {}
 
-  run(jobId: number, runId: number, account: AccountRow, mode: string, config: Record<string, unknown>): Promise<EngineResult> {
+  run(jobId: number, runId: number, account: AccountRow, mode: string, config: Record<string, unknown>, options: Record<string, unknown> = {}): Promise<EngineResult> {
     const cliMode = mode === 'discover' ? 'start' : mode;
     const runtimePath = join(process.cwd(), 'my_config.js');
     const aiConfig = this.ai.resolve(account.id);
@@ -33,6 +33,8 @@ export class EngineRunner {
       AI_SENSITIVE_WORDS: JSON.stringify(aiConfig.sensitiveWords),
       NOTE: account.note || ''
     };
+    const commentLimit = Math.min(100, Math.max(1, Number(options.limit) || 20));
+    const commentItems = mode === 'comment_backfill' ? this.db.listCommentBackfillCandidates(account.id, commentLimit) : [];
     const child = spawn(process.execPath, [join(process.cwd(), 'main.js'), cliMode], {
       cwd: process.cwd(),
       env: {
@@ -42,6 +44,7 @@ export class EngineRunner {
         LOTTERY_ACCOUNT_SCOPE: String(account.id),
         LOTTERY_LOG_LEVEL: '3',
         NOT_GO_LOTTERY: mode === 'discover' ? '1' : '',
+        COMMENT_BACKFILL_ITEMS: mode === 'comment_backfill' ? JSON.stringify(commentItems.map(item => ({ dyid: String(item.dyid), author: String(item.author || ''), description: String(item.description || ''), url: String(item.url || '') }))) : '',
         WEB_MANAGED_NOTIFICATIONS: '1',
         ...aiEnv
       },

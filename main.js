@@ -108,6 +108,9 @@ async function main() {
                     }
                     await start(NUMBER);
                     break;
+                case 'comment_backfill':
+                    await require('./lib/comment-backfill').runCommentBackfill();
+                    break;
                 case 'check':
                     log.info('中奖检测', '检查是否中奖');
                     loop_wait = check_loop_wait;

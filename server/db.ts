@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { hashPassword } from './security';
 
 export type AccountRow = { id: number; uid: string | null; name: string | null; note: string; cookie: string; cookie_status: string; enabled: number; profile_json: string | null; last_verified_at: string | null; verification_error: string | null; created_at: string; updated_at: string };
-export type JobRow = { id: number; account_id: number; type: string; status: string; requested_at: string; started_at: string | null; finished_at: string | null; error: string | null };
+export type JobRow = { id: number; account_id: number; type: string; status: string; options_json: string | null; requested_at: string; started_at: string | null; finished_at: string | null; error: string | null };
 export type ScheduleRow = { id: number; account_id: number; type: string; cron: string; enabled: number; is_override: number; last_run_at: string | null; next_run_at: string | null; last_job_id: number | null; created_at: string; updated_at: string };
 export type ScheduleSeed = { accountId: number; type: string; cron: string; enabled: boolean; nextRunAt: string | null; isOverride: boolean };
 export type NotificationRow = { id: number; account_id: number | null; run_id: number | null; channel: string; event_type: string; title: string; content: string; status: string; error: string | null; attempts: number; last_attempt_at: string | null; created_at: string };
@@ -75,6 +75,7 @@ export class AppDatabase {
     this.addColumn('runs', 'participated_count INTEGER NOT NULL DEFAULT 0');
     this.addColumn('runs', 'partial_count INTEGER NOT NULL DEFAULT 0');
     this.addColumn('runs', 'failed_count INTEGER NOT NULL DEFAULT 0');
+    this.addColumn('jobs', 'options_json TEXT');
     this.addColumn('account_schedules', 'is_override INTEGER NOT NULL DEFAULT 1');
     this.db.run("UPDATE lotteries SET source='legacy' WHERE source IN ('start','discover')");
     this.db.run("UPDATE lotteries SET discovery_status=CASE WHEN status='candidate' THEN 'candidate' WHEN status='filtered' THEN 'filtered' WHEN status IN ('participated','failed') THEN 'candidate' ELSE 'pending' END WHERE discovery_status='pending'");
@@ -134,7 +135,7 @@ export class AppDatabase {
     } catch (error) { this.db.run('ROLLBACK'); throw error; }
     return rows.length;
   }
-  createJob(accountId: number, type: string) { const id = this.insert('INSERT INTO jobs(account_id,type,requested_at) VALUES (?,?,?)', [accountId, type, this.now()]); return this.getJob(id)!; }
+  createJob(accountId: number, type: string, options?: Record<string, unknown>) { const id = this.insert('INSERT INTO jobs(account_id,type,options_json,requested_at) VALUES (?,?,?,?)', [accountId, type, options ? JSON.stringify(options) : null, this.now()]); return this.getJob(id)!; }
   listJobs(limit = 50) { return this.rows('SELECT j.*,a.name account_name,a.uid FROM jobs j JOIN accounts a ON a.id=j.account_id ORDER BY j.id DESC LIMIT ?', [limit]); }
   getJob(id: number) { return this.row<JobRow>('SELECT * FROM jobs WHERE id=?', [id]); }
   updateJob(id: number, status: string, fields: { startedAt?: string; finishedAt?: string; error?: string } = {}) { this.run('UPDATE jobs SET status=?,started_at=COALESCE(?,started_at),finished_at=COALESCE(?,finished_at),error=COALESCE(?,error) WHERE id=?', [status, fields.startedAt || null, fields.finishedAt || null, fields.error || null, id]); return this.getJob(id); }
@@ -268,6 +269,26 @@ export class AppDatabase {
   listRunParticipations(runId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('run', runId, query); }
   listLotteryParticipations(lotteryId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('lottery', lotteryId, query); }
   listLotteryBackfillCandidates(limit = 20) { return this.rows<any>("SELECT l.*,a.cookie,a.cookie_status FROM lotteries l JOIN accounts a ON a.id=l.account_id WHERE a.enabled=1 AND a.cookie_status!='invalid' AND l.enrichment_status!='failed' AND (l.description IS NULL OR l.description='' OR l.enrichment_status='pending') ORDER BY l.id LIMIT ?", [limit]); }
+  listCommentBackfillCandidates(accountId: number, limit = 20) {
+    return this.rows<any>(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,l.account_id,a.cookie,a.cookie_status
+      FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id
+      WHERE p.account_id=? AND a.enabled=1 AND a.cookie_status='valid'
+        AND p.run_id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND j.type!='discover')
+        AND p.overall_status IN ('success','partial')
+        AND p.comment_status IN ('not_required','not_attempted')
+        AND NOT EXISTS (SELECT 1 FROM participation_records p2 JOIN runs r2 ON r2.id=p2.run_id JOIN jobs j2 ON j2.id=r2.job_id WHERE p2.account_id=p.account_id AND p2.dyid=p.dyid AND j2.type='comment_backfill')
+      GROUP BY p.account_id,p.dyid ORDER BY MIN(p.id) ASC LIMIT ?`, [accountId, accountId, Math.min(100, Math.max(1, Number(limit) || 20))]);
+  }
+  commentBackfillStats(accountId: number) {
+    const pending = Number(this.row<any>(`SELECT COUNT(DISTINCT p.dyid) count FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id
+      WHERE p.account_id=? AND a.enabled=1 AND a.cookie_status='valid' AND p.overall_status IN ('success','partial') AND p.comment_status IN ('not_required','not_attempted')
+      AND p.run_id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND j.type!='discover')
+      AND NOT EXISTS (SELECT 1 FROM participation_records p2 JOIN runs r2 ON r2.id=p2.run_id JOIN jobs j2 ON j2.id=r2.job_id WHERE p2.account_id=p.account_id AND p2.dyid=p.dyid AND j2.type='comment_backfill')`, [accountId, accountId])?.count || 0);
+    const success = Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p WHERE p.account_id=? AND p.comment_status='success' AND p.run_id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND j.type='comment_backfill')`, [accountId, accountId])?.count || 0);
+    const failed = Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p WHERE p.account_id=? AND p.comment_status='failed' AND p.run_id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND j.type='comment_backfill')`, [accountId, accountId])?.count || 0);
+    const latestJob = this.row<any>("SELECT * FROM jobs WHERE account_id=? AND type='comment_backfill' ORDER BY id DESC LIMIT 1", [accountId]);
+    return { pending, success, failed, latestJob };
+  }
   listLotteryDrawTimeCandidates(limit = 500) { return this.rows<any>("SELECT * FROM lotteries WHERE draw_time IS NULL AND official=0 AND description IS NOT NULL AND description!='' ORDER BY id DESC LIMIT ?", [limit]); }
   lotteryBackfillStats() { const total = Number(this.row<any>('SELECT COUNT(*) count FROM lotteries')?.count || 0); const pending = Number(this.row<any>("SELECT COUNT(*) count FROM lotteries WHERE enrichment_status!='failed' AND (description IS NULL OR description='' OR enrichment_status='pending')")?.count || 0); const failed = Number(this.row<any>("SELECT COUNT(*) count FROM lotteries WHERE enrichment_status='failed'")?.count || 0); return { total, pending, failed, complete: Math.max(0, total - pending - failed) }; }
   listWins(limit = 100) { return this.rows('SELECT w.*,a.name account_name FROM win_events w JOIN accounts a ON a.id=w.account_id ORDER BY w.id DESC LIMIT ?', [limit]); }

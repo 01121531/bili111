@@ -73,3 +73,26 @@ test('关注失败后仍继续点赞、评论和转发，已点赞记为成功',
         Object.assign(bili, originals); Object.assign(config, originalConfig);
     }
 });
+
+test('补充评论模式只评论且重复评论不会改文案二次发送', async () => {
+    const originals = { sendChatWithOcr: bili.sendChatWithOcr, autoAttention: bili.autoAttention, autolike: bili.autolike, autoRelay: bili.autoRelay };
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
+    const calls = [];
+    config.is_copy_chat = false; config.is_repost_then_chat = false;
+    bili.sendChatWithOcr = async () => { calls.push('comment'); return 9; };
+    bili.autoAttention = async () => { calls.push('follow'); return 0; };
+    bili.autolike = async () => { calls.push('like'); return 0; };
+    bili.autoRelay = async () => { calls.push('relay'); return 0; };
+    try {
+        const result = await new Monitor(['FollowFeed', 1]).go(option({ uid: ['902'], commentOnly: true }));
+        assert.equal(result.overallStatus, 'success');
+        assert.equal(result.comment.status, 'success');
+        assert.match(result.comment.reason, /重复评论/);
+        assert.equal(result.follow.status, 'not_required');
+        assert.equal(result.like.status, 'not_required');
+        assert.equal(result.relay.status, 'not_required');
+        assert.deepEqual(calls, ['comment']);
+    } finally {
+        Object.assign(bili, originals); Object.assign(config, originalConfig);
+    }
+});

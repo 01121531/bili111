@@ -207,6 +207,29 @@ test('参与明细按账号和运行隔离并保存实际评论与转发文案',
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
 
+test('历史评论补充候选按账号隔离且成功补充后不再出现', async () => {
+  const item = await databaseFixture();
+  try {
+    const first = item.db.createAccount({ uid: '7501', name: '账号一', cookie: encrypt('DedeUserID=7501') })!;
+    const second = item.db.createAccount({ uid: '7502', name: '账号二', cookie: encrypt('DedeUserID=7502') })!;
+    const firstRun = item.db.createRun(item.db.createJob(first.id, 'start').id, first.id);
+    const secondRun = item.db.createRun(item.db.createJob(second.id, 'start').id, second.id);
+    item.db.upsertLottery(first.id, { dyid: '450000001', author: '作者一', description: '评论并转发参与', status: 'candidate', runId: firstRun });
+    item.db.upsertParticipation(first.id, firstRun, { dyid: '450000001', overallStatus: 'success', comment: { status: 'not_required', reason: '当前配置未要求此操作' }, follow: { status: 'success' }, like: { status: 'success' }, relay: { status: 'success' } });
+    item.db.upsertLottery(second.id, { dyid: '450000001', author: '作者一', description: '评论并转发参与', status: 'candidate', runId: secondRun });
+    item.db.upsertParticipation(second.id, secondRun, { dyid: '450000001', overallStatus: 'success', comment: { status: 'success', actualText: '已经评论' } });
+    assert.deepEqual(item.db.listCommentBackfillCandidates(first.id, 20).map((row: any) => row.dyid), ['450000001']);
+    assert.equal(item.db.listCommentBackfillCandidates(second.id, 20).length, 0);
+    assert.equal(item.db.commentBackfillStats(first.id).pending, 1);
+
+    const fillJob = item.db.createJob(first.id, 'comment_backfill', { limit: 20 });
+    const fillRun = item.db.createRun(fillJob.id, first.id);
+    item.db.upsertParticipation(first.id, fillRun, { dyid: '450000001', overallStatus: 'success', comment: { status: 'success', actualText: '补充评论', source: 'configured' } });
+    assert.equal(item.db.listCommentBackfillCandidates(first.id, 20).length, 0);
+    assert.equal(item.db.commentBackfillStats(first.id).success, 1);
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});
+
 test('同一动态允许不同账号分别参与且详情汇总全部账号', async () => {
   const item = await databaseFixture();
   try {

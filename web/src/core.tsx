@@ -19,7 +19,7 @@ export async function api<T = AnyObject>(path: string, init: RequestInit = {}): 
   return data as T;
 }
 
-export const taskText: AnyObject = { start: '执行抽奖', discover: '仅发现抽奖', check: '中奖检测', clear: '清理账号', account: '验证账号' };
+export const taskText: AnyObject = { start: '执行抽奖', discover: '仅发现抽奖', check: '中奖检测', clear: '清理账号', account: '验证账号', comment_backfill: '补充历史评论' };
 export const statusText: AnyObject = {
   valid: '正常', invalid: '失效', unknown: '待验证', pending: '排队中', running: '运行中', success: '已完成', failed: '失败', skipped: '已跳过', cancelled: '已取消',
   candidate: '候选', filtered: '未通过筛选', participated: '已参与', partial: '部分完成', not_attempted: '未尝试', not_required: '未要求', already_participated: '此前已参与'

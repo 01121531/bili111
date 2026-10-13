@@ -129,7 +129,7 @@ module.exports = Object.freeze({
          * - '01'只评论非官抽
          * - '11'都评论
          */
-        chatmodel: '01',
+        chatmodel: '11',
 
         /**
          * 不参与预约抽奖

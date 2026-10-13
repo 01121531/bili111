@@ -38,6 +38,8 @@ test('默认账号配置按内置、默认和账号覆盖顺序合并', () => {
   assert.equal(runtime.default_config.uid_scan_page, 8);
   assert.equal(runtime.config_7.uid_scan_page, 12);
   assert.equal(runtime.config_7.maxday, Infinity);
+  assert.equal(runtime.default_config.chatmodel, '11');
+  assert.equal(mergedConfig({ chatmodel: '01' }).chatmodel, '01');
 });
 
 test('恢复默认和应用到全部账号只清除业务覆盖并保留 AI', async () => {
