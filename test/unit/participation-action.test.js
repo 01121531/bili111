@@ -96,3 +96,21 @@ test('补充评论模式只评论且重复评论不会改文案二次发送', as
         Object.assign(bili, originals); Object.assign(config, originalConfig);
     }
 });
+
+test('账号未转正的评论失败保存明确原因', async () => {
+    const original = bili.sendChatWithOcr;
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
+    config.is_copy_chat = false; config.is_repost_then_chat = false;
+    bili.sendChatWithOcr = async () => 13;
+    try {
+        const result = await new Monitor(['FollowFeed', 1]).go(option({ commentOnly: true }));
+        assert.equal(result.code, 1013);
+        assert.equal(result.overallStatus, 'failed');
+        assert.equal(result.comment.code, 13);
+        assert.equal(result.comment.reason, '评论失败：账号未转正');
+        assert.equal(result.reason, '评论失败：账号未转正');
+    } finally {
+        bili.sendChatWithOcr = original;
+        Object.assign(config, originalConfig);
+    }
+});
