@@ -13,15 +13,29 @@ function option(overrides = {}) {
     };
 }
 
+function detailed(action, internalCode = 0, overrides = {}) {
+    const status = internalCode ? 'failed' : 'success';
+    const result = {
+        action, status, internalCode, providerCode: internalCode ? -1 : 0,
+        providerMessage: internalCode ? '测试错误' : '', errorType: internalCode ? 'bili_api' : null,
+        httpStatus: 200, transportCode: null, retryable: false,
+        targetId: action === 'follow' ? '902' : '500000001', occurredAt: new Date().toISOString(),
+        reason: internalCode ? 'B站返回 -1（测试错误）' : '操作成功',
+        ...overrides
+    };
+    result.attempts = overrides.attempts || [{ ...result }];
+    return result;
+}
+
 test('参与动作返回实际评论、转发文案和来源', async () => {
-    const originals = { sendChatWithOcr: bili.sendChatWithOcr, autolike: bili.autolike, autoRelay: bili.autoRelay };
+    const originals = { sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed, autolikeDetailed: bili.autolikeDetailed, autoRelayDetailed: bili.autoRelayDetailed };
     const originalConfig = { check_if_duplicated: config.check_if_duplicated, is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
     let commentCalls = 0; let relayedText = '';
     config.check_if_duplicated = 3; config.is_copy_chat = false; config.is_repost_then_chat = false;
     globalVar.set('myUID', '701');
-    bili.sendChatWithOcr = async () => { commentCalls += 1; return commentCalls === 1 ? 8 : 0; };
-    bili.autolike = async () => 0;
-    bili.autoRelay = async (_uid, _dyid, text) => { relayedText = text; return 0; };
+    bili.sendChatWithOcrDetailed = async () => { commentCalls += 1; return detailed('comment', commentCalls === 1 ? 8 : 0); };
+    bili.autolikeDetailed = async () => detailed('like');
+    bili.autoRelayDetailed = async (_uid, _dyid, text) => { relayedText = text; return detailed('relay'); };
     try {
         const result = await new Monitor(['FollowFeed', 1]).go(option());
         assert.equal(result.code, 0); assert.equal(result.overallStatus, 'success');
@@ -36,12 +50,12 @@ test('参与动作返回实际评论、转发文案和来源', async () => {
 });
 
 test('前序动作成功而后续动作失败时标记为部分完成', async () => {
-    const originals = { sendChatWithOcr: bili.sendChatWithOcr, autolike: bili.autolike, autoRelay: bili.autoRelay };
+    const originals = { sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed, autolikeDetailed: bili.autolikeDetailed, autoRelayDetailed: bili.autoRelayDetailed };
     const originalConfig = { check_if_duplicated: config.check_if_duplicated, is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
     config.check_if_duplicated = 3; config.is_copy_chat = false; config.is_repost_then_chat = false;
-    bili.sendChatWithOcr = async () => 0;
-    bili.autolike = async () => 2;
-    bili.autoRelay = async () => 0;
+    bili.sendChatWithOcrDetailed = async () => detailed('comment');
+    bili.autolikeDetailed = async () => detailed('like', 2, { providerCode: 1000113, providerMessage: '点赞异常', reason: 'B站返回 1000113（点赞异常）' });
+    bili.autoRelayDetailed = async () => detailed('relay');
     try {
         const result = await new Monitor(['FollowFeed', 1]).go(option());
         assert.equal(result.code, 4002); assert.equal(result.overallStatus, 'partial');
@@ -53,14 +67,14 @@ test('前序动作成功而后续动作失败时标记为部分完成', async ()
 });
 
 test('关注失败后仍继续点赞、评论和转发，已点赞记为成功', async () => {
-    const originals = { sendChatWithOcr: bili.sendChatWithOcr, autoAttention: bili.autoAttention, autolike: bili.autolike, autoRelay: bili.autoRelay };
+    const originals = { sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed, autoAttentionDetailed: bili.autoAttentionDetailed, autolikeDetailed: bili.autolikeDetailed, autoRelayDetailed: bili.autoRelayDetailed };
     const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat, is_not_create_partition: config.is_not_create_partition };
     config.is_copy_chat = false; config.is_repost_then_chat = false; config.is_not_create_partition = true;
     const calls = [];
-    bili.sendChatWithOcr = async () => { calls.push('comment'); return 0; };
-    bili.autoAttention = async () => { calls.push('follow'); return 2; };
-    bili.autolike = async () => { calls.push('like'); return 0; };
-    bili.autoRelay = async () => { calls.push('relay'); return 0; };
+    bili.sendChatWithOcrDetailed = async () => { calls.push('comment'); return detailed('comment'); };
+    bili.autoAttentionDetailed = async () => { calls.push('follow'); return detailed('follow', 2, { providerCode: 22002, providerMessage: '您已被对方拉入黑名单', reason: 'B站返回 22002（您已被对方拉入黑名单）' }); };
+    bili.autolikeDetailed = async () => { calls.push('like'); return detailed('like'); };
+    bili.autoRelayDetailed = async () => { calls.push('relay'); return detailed('relay'); };
     try {
         const result = await new Monitor(['FollowFeed', 1]).go(option({ uid: ['902'], is_liked: false }));
         assert.equal(result.overallStatus, 'partial');
@@ -75,14 +89,14 @@ test('关注失败后仍继续点赞、评论和转发，已点赞记为成功',
 });
 
 test('补充评论模式只评论且重复评论不会改文案二次发送', async () => {
-    const originals = { sendChatWithOcr: bili.sendChatWithOcr, autoAttention: bili.autoAttention, autolike: bili.autolike, autoRelay: bili.autoRelay };
+    const originals = { sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed, autoAttentionDetailed: bili.autoAttentionDetailed, autolikeDetailed: bili.autolikeDetailed, autoRelayDetailed: bili.autoRelayDetailed };
     const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
     const calls = [];
     config.is_copy_chat = false; config.is_repost_then_chat = false;
-    bili.sendChatWithOcr = async () => { calls.push('comment'); return 9; };
-    bili.autoAttention = async () => { calls.push('follow'); return 0; };
-    bili.autolike = async () => { calls.push('like'); return 0; };
-    bili.autoRelay = async () => { calls.push('relay'); return 0; };
+    bili.sendChatWithOcrDetailed = async () => { calls.push('comment'); return detailed('comment', 9, { providerCode: 12051, providerMessage: '重复评论', reason: 'B站返回 12051（重复评论）' }); };
+    bili.autoAttentionDetailed = async () => { calls.push('follow'); return detailed('follow'); };
+    bili.autolikeDetailed = async () => { calls.push('like'); return detailed('like'); };
+    bili.autoRelayDetailed = async () => { calls.push('relay'); return detailed('relay'); };
     try {
         const result = await new Monitor(['FollowFeed', 1]).go(option({ uid: ['902'], commentOnly: true }));
         assert.equal(result.overallStatus, 'success');
@@ -98,19 +112,58 @@ test('补充评论模式只评论且重复评论不会改文案二次发送', as
 });
 
 test('账号未转正的评论失败保存明确原因', async () => {
-    const original = bili.sendChatWithOcr;
+    const original = bili.sendChatWithOcrDetailed;
     const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
     config.is_copy_chat = false; config.is_repost_then_chat = false;
-    bili.sendChatWithOcr = async () => 13;
+    bili.sendChatWithOcrDetailed = async () => detailed('comment', 13, { providerCode: -107, providerMessage: '账号未转正', reason: 'B站返回 -107（账号未转正）' });
     try {
         const result = await new Monitor(['FollowFeed', 1]).go(option({ commentOnly: true }));
         assert.equal(result.code, 1013);
         assert.equal(result.overallStatus, 'failed');
         assert.equal(result.comment.code, 13);
-        assert.equal(result.comment.reason, '评论失败：账号未转正');
-        assert.equal(result.reason, '评论失败：账号未转正');
+        assert.equal(result.comment.reason, '评论失败：B站返回 -107（账号未转正）');
+        assert.equal(result.reason, '评论失败：B站返回 -107（账号未转正）');
+        assert.equal(result.comment.attempts[0].providerCode, -107);
     } finally {
-        bili.sendChatWithOcr = original;
+        bili.sendChatWithOcrDetailed = original;
         Object.assign(config, originalConfig);
+    }
+});
+
+test('多个动作失败时合并全部真实原因并保留各自尝试', async () => {
+    const originals = { sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed, autolikeDetailed: bili.autolikeDetailed, autoRelayDetailed: bili.autoRelayDetailed };
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
+    config.is_copy_chat = false; config.is_repost_then_chat = false;
+    bili.sendChatWithOcrDetailed = async () => detailed('comment', 13, { providerCode: -107, providerMessage: '账号未转正', reason: 'B站返回 -107（账号未转正）' });
+    bili.autolikeDetailed = async () => detailed('like');
+    bili.autoRelayDetailed = async () => detailed('relay', 6, { providerCode: 4126021, providerMessage: '等级不足无法发送，快去努力升级吧', reason: 'B站返回 4126021（等级不足无法发送，快去努力升级吧）' });
+    try {
+        const result = await new Monitor(['FollowFeed', 1]).go(option());
+        assert.equal(result.overallStatus, 'partial');
+        assert.match(result.reason, /评论失败：B站返回 -107/);
+        assert.match(result.reason, /转发失败：B站返回 4126021/);
+        assert.equal(result.comment.attempts[0].providerCode, -107);
+        assert.equal(result.relay.attempts[0].providerCode, 4126021);
+    } finally {
+        Object.assign(bili, originals); Object.assign(config, originalConfig);
+    }
+});
+
+test('多个关注目标分别保留目标和失败原因', async () => {
+    const originals = { sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed, autoAttentionDetailed: bili.autoAttentionDetailed, autolikeDetailed: bili.autolikeDetailed, autoRelayDetailed: bili.autoRelayDetailed };
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat, is_not_create_partition: config.is_not_create_partition };
+    config.is_copy_chat = false; config.is_repost_then_chat = false; config.is_not_create_partition = true;
+    bili.sendChatWithOcrDetailed = async () => detailed('comment');
+    bili.autoAttentionDetailed = async uid => detailed('follow', 2, { targetId: uid, providerCode: uid === '901' ? 22002 : 22003, providerMessage: uid === '901' ? '您已被对方拉入黑名单' : '黑名单用户无法关注', reason: uid === '901' ? 'B站返回 22002（您已被对方拉入黑名单）' : 'B站返回 22003（黑名单用户无法关注）' });
+    bili.autolikeDetailed = async () => detailed('like');
+    bili.autoRelayDetailed = async () => detailed('relay');
+    try {
+        const result = await new Monitor(['FollowFeed', 1]).go(option({ uid: ['901', '902'] }));
+        assert.equal(result.follow.status, 'failed');
+        assert.match(result.follow.reason, /22002/);
+        assert.match(result.follow.reason, /22003/);
+        assert.deepEqual(result.follow.attempts.map(item => item.targetId), ['901', '902']);
+    } finally {
+        Object.assign(bili, originals); Object.assign(config, originalConfig);
     }
 });

@@ -9,7 +9,7 @@ function request(url, options = {}) {
             url,
             ...options,
             success: response => resolve({ ok: true, response }),
-            failure: error => resolve({ ok: false, error })
+            failure: (error, detail) => resolve({ ok: false, error, detail })
         });
     });
 }
@@ -37,6 +37,9 @@ test('HTTP 404 和 412 不重试', async t => {
                 const result = await request(url);
                 assert.equal(result.ok, false);
                 assert.match(result.error, new RegExp(`HTTP状态码:${statusCode}`));
+                assert.equal(result.detail.errorType, 'http');
+                assert.equal(result.detail.httpStatus, statusCode);
+                assert.match(result.detail.body, /request blocked/);
             });
             assert.equal(calls, 1);
         });
@@ -89,5 +92,18 @@ test('表单编码会规范化非法 Unicode，避免 URI malformed', async () =
             config: { retry: false }
         });
         assert.equal(result.ok, true);
+    });
+});
+
+test('网络拒绝和请求超时返回可诊断类型', async () => {
+    const refused = await request('http://127.0.0.1:9', { config: { retry: false, timeout: 50 } });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.detail.errorType, 'network');
+    assert.ok(refused.detail.transportCode);
+
+    await withServer(() => {}, async url => {
+        const timedOut = await request(url, { config: { retry: false, timeout: 20 } });
+        assert.equal(timedOut.ok, false);
+        assert.equal(timedOut.detail.errorType, 'timeout');
     });
 });

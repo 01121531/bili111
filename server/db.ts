@@ -9,7 +9,8 @@ export type ScheduleRow = { id: number; account_id: number; type: string; cron: 
 export type ScheduleSeed = { accountId: number; type: string; cron: string; enabled: boolean; nextRunAt: string | null; isOverride: boolean };
 export type NotificationRow = { id: number; account_id: number | null; run_id: number | null; channel: string; event_type: string; title: string; content: string; status: string; error: string | null; attempts: number; last_attempt_at: string | null; created_at: string };
 export type LotteryInput = { dyid: string; source?: string; author?: string; authorUid?: string | null; description?: string; drawTime?: number | null; drawTimeSource?: string | null; official?: boolean; status?: string; resultReason?: string; url?: string; sourceCreatedAt?: number | null; enrichmentStatus?: string; runId?: number };
-export type ParticipationAction = { plannedText?: string | null; actualText?: string | null; source?: string; status?: string; code?: number; reason?: string };
+export type ParticipationAttemptInput = { action?: string; status?: string; internalCode?: number; providerCode?: number | null; providerMessage?: string | null; errorType?: string | null; httpStatus?: number | null; transportCode?: string | null; retryable?: boolean; attemptNo?: number; targetId?: string | null; occurredAt?: string };
+export type ParticipationAction = { plannedText?: string | null; actualText?: string | null; source?: string; status?: string; code?: number; reason?: string; attempts?: ParticipationAttemptInput[] };
 export type ParticipationInput = { dyid: string; overallStatus: string; resultCode?: number; resultReason?: string; comment?: ParticipationAction; follow?: ParticipationAction; like?: ParticipationAction; relay?: ParticipationAction; startedAt?: string; finishedAt?: string };
 export type LotteryQuery = { page?: number; pageSize?: number; accountId?: number; source?: string; discoveryStatus?: string; participationStatus?: string; drawTimeSource?: string; filterSource?: string; search?: string; from?: string; to?: string };
 export type ParticipationQuery = { page?: number; pageSize?: number; status?: string; search?: string };
@@ -47,6 +48,7 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS lotteries (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, dyid TEXT NOT NULL, source TEXT, author TEXT, description TEXT, draw_time INTEGER, draw_time_source TEXT, official INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'discovered', result_reason TEXT, url TEXT, source_created_at INTEGER, enrichment_status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, updated_at TEXT, UNIQUE(account_id,dyid));
       CREATE TABLE IF NOT EXISTS lottery_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, run_id INTEGER, lottery_id INTEGER NOT NULL, dyid TEXT NOT NULL, stage TEXT NOT NULL, status TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS participation_records (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, account_id INTEGER NOT NULL, lottery_id INTEGER NOT NULL, dyid TEXT NOT NULL, overall_status TEXT NOT NULL, result_code INTEGER NOT NULL DEFAULT 0, result_reason TEXT, comment_planned_text TEXT, comment_text TEXT, comment_source TEXT, comment_status TEXT NOT NULL DEFAULT 'not_required', comment_code INTEGER NOT NULL DEFAULT 0, comment_reason TEXT, follow_status TEXT NOT NULL DEFAULT 'not_required', follow_code INTEGER NOT NULL DEFAULT 0, follow_reason TEXT, like_status TEXT NOT NULL DEFAULT 'not_required', like_code INTEGER NOT NULL DEFAULT 0, like_reason TEXT, relay_planned_text TEXT, relay_text TEXT, relay_source TEXT, relay_status TEXT NOT NULL DEFAULT 'not_required', relay_code INTEGER NOT NULL DEFAULT 0, relay_reason TEXT, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, UNIQUE(run_id,lottery_id));
+      CREATE TABLE IF NOT EXISTS participation_action_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, participation_id INTEGER NOT NULL, run_id INTEGER NOT NULL, account_id INTEGER NOT NULL, lottery_id INTEGER NOT NULL, dyid TEXT NOT NULL, action TEXT NOT NULL, target_id TEXT NOT NULL DEFAULT '', attempt_no INTEGER NOT NULL, status TEXT NOT NULL, internal_code INTEGER NOT NULL DEFAULT 0, provider_code INTEGER, provider_message TEXT, error_type TEXT, http_status INTEGER, transport_code TEXT, retryable INTEGER NOT NULL DEFAULT 0, occurred_at TEXT NOT NULL, UNIQUE(participation_id,action,target_id,attempt_no));
       CREATE TABLE IF NOT EXISTS win_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, source TEXT NOT NULL, actor TEXT, content TEXT NOT NULL, url TEXT, occurred_at TEXT, event_key TEXT, matched INTEGER NOT NULL DEFAULT 1, is_read INTEGER NOT NULL DEFAULT 0, detected_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS notifications (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER, run_id INTEGER, channel TEXT NOT NULL, event_type TEXT NOT NULL DEFAULT '', title TEXT, content TEXT, status TEXT NOT NULL, error TEXT, attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS account_schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, type TEXT NOT NULL, cron TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_run_at TEXT, next_run_at TEXT, last_job_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(account_id,type));
@@ -98,10 +100,73 @@ export class AppDatabase {
     this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_records_run ON participation_records(run_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_records_lottery ON participation_records(lottery_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_records_account_dyid ON participation_records(account_id,dyid,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_attempts_participation ON participation_action_attempts(participation_id,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_attempts_error ON participation_action_attempts(provider_code,error_type,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_cleanup_records_run ON cleanup_records(run_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_lotteries_cleanup_protection ON lotteries(account_id,source_created_at,participation_status)');
     this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_win_events_event_key ON win_events(event_key) WHERE event_key IS NOT NULL');
+    this.recoverHistoricalParticipationErrors();
     this.flush(); if (!this.getSetting('admin_password_hash')) this.setSetting('admin_password_hash', hashPassword(process.env.ADMIN_PASSWORD || 'admin'));
+  }
+  private recoverHistoricalParticipationErrors() {
+    const marker = 'participation_error_backfill_v1';
+    if (this.row<{ value: string }>('SELECT value FROM system_settings WHERE key=?', [marker])) return;
+    const contextActions: Record<string, string> = { '自动评论': 'comment', '自动关注': 'follow', '移动分区': 'follow_group', '自动点赞': 'like', '转发动态': 'relay' };
+    const labels: Record<string, string> = { comment: '评论', follow: '关注', follow_group: '关注分组', like: '点赞', relay: '转发' };
+    const logs = this.rows<any>('SELECT id,run_id,context,message,created_at FROM logs ORDER BY run_id,id');
+    const recovered = new Map<string, any[]>();
+    let currentRun = 0; let pending: any = null;
+    for (const item of logs) {
+      if (Number(item.run_id) !== currentRun) { currentRun = Number(item.run_id); pending = null; }
+      const action = contextActions[String(item.context || '')];
+      if (action && /\[Error\]|未知错误|失败/.test(String(item.message || ''))) pending = { action, detail: null };
+      if (pending && String(item.message || '').trim().startsWith('{')) {
+        try {
+          const value = JSON.parse(String(item.message));
+          if (Number.isFinite(Number(value?.code)) && Number(value.code) !== 0) pending.detail = { code: Number(value.code), message: String(value.message || '').trim().slice(0, 500), createdAt: item.created_at };
+        } catch { /* old logs may contain non-JSON fragments */ }
+      }
+      const match = String(item.message || '').match(/dyid:\s*(\d+)/i);
+      if (pending?.detail && match) {
+        const key = `${currentRun}:${match[1]}:${pending.action}`;
+        const targetPattern = pending.action === 'comment' ? /rid:\s*([^,\s]+)/i : ['follow', 'follow_group'].includes(pending.action) ? /uid:\s*([^,\s]+)/i : /dyid:\s*([^,\s]+)/i;
+        pending.detail.targetId = String(item.message || '').match(targetPattern)?.[1] || match[1];
+        const values = recovered.get(key) || []; values.push(pending.detail); recovered.set(key, values); pending = null;
+      }
+    }
+    const records = this.rows<any>(`SELECT * FROM participation_records WHERE
+      comment_status='failed' OR follow_status='failed' OR like_status='failed' OR relay_status='failed'`);
+    const providerInternalCode = (action: string, code: number, fallback: number) => {
+      if (action === 'comment' && code === -107) return 13;
+      if (action === 'relay' && code === 4126021) return 6;
+      return fallback || 1;
+    };
+    this.db.run('BEGIN');
+    try {
+      for (const record of records) {
+        const actions = ['comment', 'follow', 'follow_group', 'like', 'relay'];
+        for (const action of actions) {
+          const field = action === 'follow_group' ? 'follow' : action;
+          if (record[`${field}_status`] !== 'failed') continue;
+          const matches = recovered.get(`${record.run_id}:${record.dyid}:${action}`) || [];
+          if (matches.length !== 1) continue;
+          const detail = matches[0]; const internalCode = providerInternalCode(action, detail.code, Number(record[`${field}_code`]) || 1);
+          const reason = `${labels[action]}失败：B站返回 ${detail.code}${detail.message ? `（${detail.message}）` : ''}`;
+          this.db.run(`INSERT OR IGNORE INTO participation_action_attempts(participation_id,run_id,account_id,lottery_id,dyid,action,target_id,attempt_no,status,internal_code,provider_code,provider_message,error_type,http_status,transport_code,retryable,occurred_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [record.id, record.run_id, record.account_id, record.lottery_id, record.dyid, action, String(detail.targetId || record.dyid), 1, 'failed', internalCode, detail.code, detail.message || null, 'bili_api', null, null, 0, detail.createdAt || record.finished_at]);
+          if (/未知错误|状态码/.test(String(record[`${field}_reason`] || ''))) {
+            this.db.run(`UPDATE participation_records SET ${field}_code=?,${field}_reason=? WHERE id=?`, [internalCode, reason, record.id]);
+            record[`${field}_code`] = internalCode; record[`${field}_reason`] = reason;
+          }
+        }
+        const failedReasons = ['comment', 'follow', 'like', 'relay'].filter(action => record[`${action}_status`] === 'failed').map(action => record[`${action}_reason`]).filter(Boolean);
+        if (failedReasons.length && (/未知错误|状态码/.test(String(record.result_reason || '')) || failedReasons.some(reason => !String(record.result_reason || '').includes(reason)))) {
+          this.db.run('UPDATE participation_records SET result_reason=? WHERE id=?', [[...new Set(failedReasons)].join('；'), record.id]);
+        }
+      }
+      this.db.run('INSERT INTO system_settings(key,value) VALUES (?,?)', [marker, new Date().toISOString()]);
+      this.db.run('COMMIT');
+    } catch (error) { this.db.run('ROLLBACK'); throw error; }
   }
   now() { return new Date().toISOString(); }
   getSetting(key: string) { return this.row<{ value: string }>('SELECT value FROM system_settings WHERE key=?', [key])?.value; }
@@ -269,22 +334,38 @@ export class AppDatabase {
     if (!lottery) throw new Error(`抽奖记录不存在：${input.dyid}`);
     const allowedOverall = new Set(['success', 'partial', 'failed']);
     const allowedAction = new Set(['not_required', 'not_attempted', 'success', 'failed']);
-    const action = (value?: ParticipationAction) => ({
+    const action = (value: ParticipationAction | undefined, defaultAction: string) => ({
       plannedText: value?.plannedText ?? null,
       actualText: value?.actualText ?? null,
       source: value?.source || 'none',
       status: allowedAction.has(value?.status || '') ? value!.status! : 'not_required',
       code: Number(value?.code) || 0,
-      reason: value?.reason || null
+      reason: value?.reason || null,
+      attempts: Array.isArray(value?.attempts) ? value!.attempts!.map(item => ({ ...item, action: item.action || defaultAction })) : []
     });
-    const comment = action(input.comment); const follow = action(input.follow); const like = action(input.like); const relay = action(input.relay);
+    const comment = action(input.comment, 'comment'); const follow = action(input.follow, 'follow'); const like = action(input.like, 'like'); const relay = action(input.relay, 'relay');
     const overallStatus = allowedOverall.has(input.overallStatus) ? input.overallStatus : 'failed';
     const now = this.now(); const startedAt = input.startedAt || now; const finishedAt = input.finishedAt || now;
     this.run(`INSERT INTO participation_records(run_id,account_id,lottery_id,dyid,overall_status,result_code,result_reason,comment_planned_text,comment_text,comment_source,comment_status,comment_code,comment_reason,follow_status,follow_code,follow_reason,like_status,like_code,like_reason,relay_planned_text,relay_text,relay_source,relay_status,relay_code,relay_reason,started_at,finished_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(run_id,lottery_id) DO UPDATE SET overall_status=excluded.overall_status,result_code=excluded.result_code,result_reason=excluded.result_reason,comment_planned_text=excluded.comment_planned_text,comment_text=excluded.comment_text,comment_source=excluded.comment_source,comment_status=excluded.comment_status,comment_code=excluded.comment_code,comment_reason=excluded.comment_reason,follow_status=excluded.follow_status,follow_code=excluded.follow_code,follow_reason=excluded.follow_reason,like_status=excluded.like_status,like_code=excluded.like_code,like_reason=excluded.like_reason,relay_planned_text=excluded.relay_planned_text,relay_text=excluded.relay_text,relay_source=excluded.relay_source,relay_status=excluded.relay_status,relay_code=excluded.relay_code,relay_reason=excluded.relay_reason,started_at=excluded.started_at,finished_at=excluded.finished_at`,
       [runId, accountId, lottery.id, input.dyid, overallStatus, Number(input.resultCode) || 0, input.resultReason || null, comment.plannedText, comment.actualText, comment.source, comment.status, comment.code, comment.reason, follow.status, follow.code, follow.reason, like.status, like.code, like.reason, relay.plannedText, relay.actualText, relay.source, relay.status, relay.code, relay.reason, startedAt, finishedAt]);
-    return this.row<any>('SELECT * FROM participation_records WHERE run_id=? AND lottery_id=?', [runId, lottery.id]);
+    const record = this.row<any>('SELECT * FROM participation_records WHERE run_id=? AND lottery_id=?', [runId, lottery.id]);
+    const validActions = new Set(['comment', 'follow', 'follow_group', 'like', 'relay']);
+    const validStatuses = new Set(['success', 'failed', 'already_done', 'challenge']);
+    const allAttempts = [...comment.attempts, ...follow.attempts, ...like.attempts, ...relay.attempts];
+    const counters = new Map<string, number>();
+    for (const item of allAttempts) {
+      const actionName = validActions.has(String(item.action || '')) ? String(item.action) : 'comment';
+      const targetId = String(item.targetId || ''); const counterKey = `${actionName}:${targetId}`;
+      const attemptNo = Math.max(1, Number(item.attemptNo) || (counters.get(counterKey) || 0) + 1); counters.set(counterKey, attemptNo);
+      const providerCode = item.providerCode === null || item.providerCode === undefined ? null : Number(item.providerCode);
+      const httpStatus = item.httpStatus === null || item.httpStatus === undefined ? null : Number(item.httpStatus);
+      this.db.run(`INSERT OR IGNORE INTO participation_action_attempts(participation_id,run_id,account_id,lottery_id,dyid,action,target_id,attempt_no,status,internal_code,provider_code,provider_message,error_type,http_status,transport_code,retryable,occurred_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [record.id, runId, accountId, lottery.id, input.dyid, actionName, targetId, attemptNo, validStatuses.has(String(item.status || '')) ? String(item.status) : 'failed', Number(item.internalCode) || 0, Number.isFinite(providerCode) ? providerCode : null, item.providerMessage || null, item.errorType || null, Number.isFinite(httpStatus) ? httpStatus : null, item.transportCode || null, item.retryable ? 1 : 0, item.occurredAt || finishedAt]);
+    }
+    if (allAttempts.length) this.flush();
+    return record;
   }
   private listParticipationRecords(scope: 'run' | 'lottery', id: number, query: ParticipationQuery = {}) {
     const page = Math.max(1, Number(query.page) || 1); const pageSize = Math.min(100, Math.max(10, Number(query.pageSize) || 25));
@@ -297,10 +378,13 @@ export class AppDatabase {
     }
     if (query.status && ['success', 'partial', 'failed'].includes(query.status)) { where.push('p.overall_status=?'); params.push(query.status); }
     if (query.search) {
-      const term = `%${query.search}%`; where.push('(p.dyid LIKE ? OR l.author LIKE ? OR l.description LIKE ? OR p.comment_text LIKE ? OR p.relay_text LIKE ?)'); params.push(term, term, term, term, term);
+      const term = `%${query.search}%`; where.push(`(p.dyid LIKE ? OR l.author LIKE ? OR l.description LIKE ? OR p.comment_text LIKE ? OR p.relay_text LIKE ? OR EXISTS (
+        SELECT 1 FROM participation_action_attempts pa WHERE pa.participation_id=p.id AND (CAST(pa.provider_code AS TEXT) LIKE ? OR pa.provider_message LIKE ? OR pa.transport_code LIKE ?)
+      ))`); params.push(term, term, term, term, term, term, term, term);
     }
     const clause = `WHERE ${where.join(' AND ')}`; const total = Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id ${clause}`, params)?.count || 0);
     const items = this.rows<any>(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,a.name account_name,r.status run_status,r.started_at run_started_at,j.type run_type FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id ${clause} ORDER BY p.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+    this.attachParticipationAttemptSummaries(items);
     for (const item of items) {
       if (item.run_type === 'comment_backfill' || item.comment_status === 'success') continue;
       const supplement = this.row<any>(`SELECT p.comment_status,p.comment_text,p.comment_source,p.comment_reason,p.run_id,p.finished_at
@@ -322,6 +406,39 @@ export class AppDatabase {
   }
   listRunParticipations(runId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('run', runId, query); }
   listLotteryParticipations(lotteryId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('lottery', lotteryId, query); }
+  private attachParticipationAttemptSummaries(items: any[]) {
+    const ids = items.map(item => Number(item.id)).filter(Boolean); if (!ids.length) return;
+    const attempts = this.rows<any>(`SELECT * FROM participation_action_attempts WHERE participation_id IN (${ids.map(() => '?').join(',')}) ORDER BY id`, ids);
+    const summaries = new Map<number, Record<string, any>>();
+    for (const attempt of attempts) {
+      const key = attempt.action === 'follow_group' ? 'follow' : attempt.action;
+      const values = summaries.get(Number(attempt.participation_id)) || {};
+      const summary = values[key] || { attemptCount: 0 };
+      summary.attemptCount += 1;
+      summary.lastProviderCode = attempt.provider_code;
+      summary.lastProviderMessage = attempt.provider_message;
+      summary.lastErrorType = attempt.error_type;
+      summary.lastHttpStatus = attempt.http_status;
+      summary.lastTransportCode = attempt.transport_code;
+      values[key] = summary; summaries.set(Number(attempt.participation_id), values);
+    }
+    for (const item of items) {
+      const values = summaries.get(Number(item.id)) || {};
+      for (const action of ['comment', 'follow', 'like', 'relay']) {
+        const summary = values[action] || { attemptCount: 0 };
+        item[`${action}_attempt_count`] = summary.attemptCount;
+        item[`${action}_last_provider_code`] = summary.lastProviderCode ?? null;
+        item[`${action}_last_provider_message`] = summary.lastProviderMessage ?? null;
+        item[`${action}_last_error_type`] = summary.lastErrorType ?? null;
+        item[`${action}_last_http_status`] = summary.lastHttpStatus ?? null;
+        item[`${action}_last_transport_code`] = summary.lastTransportCode ?? null;
+      }
+    }
+  }
+  getParticipationAttempts(id: number) {
+    return this.rows<any>('SELECT * FROM participation_action_attempts WHERE participation_id=? ORDER BY occurred_at,id', [id]);
+  }
+  getParticipation(id: number) { return this.row<any>('SELECT id FROM participation_records WHERE id=?', [id]); }
   listLotteryBackfillCandidates(limit = 20) { return this.rows<any>("SELECT l.*,a.cookie,a.cookie_status FROM lotteries l JOIN accounts a ON a.id=l.account_id WHERE a.enabled=1 AND a.cookie_status!='invalid' AND l.enrichment_status!='failed' AND (l.description IS NULL OR l.description='' OR l.enrichment_status='pending') ORDER BY l.id LIMIT ?", [limit]); }
   private commentBackfillRows(accountId: number) {
     return this.rows<any>(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,l.account_id,a.cookie_status,

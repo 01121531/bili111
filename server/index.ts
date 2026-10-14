@@ -240,6 +240,11 @@ app.get('/api/lotteries/:id/participations', { preHandler: auth }, async (reques
   const query = (request.query || {}) as any;
   return db.listLotteryParticipations(parseId((request.params as any).id), { page: Number(query.page) || 1, pageSize: Number(query.pageSize) || 25, status: query.status || undefined, search: query.search || undefined });
 });
+app.get('/api/participations/:id/attempts', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id);
+  if (!db.getParticipation(id)) return reply.code(404).send({ error: '参与记录不存在' });
+  return db.getParticipationAttempts(id);
+});
 app.get('/api/lotteries/backfill/status', { preHandler: auth }, async () => enricher.status());
 app.post('/api/lotteries/backfill', { preHandler: auth }, async (request, reply) => { const result = await enricher.runBatch(true); return result.accepted ? result : reply.code(409).send({ error: 'reason' in result ? result.reason : '补全任务暂不可用', ...result }); });
 app.get('/api/wins', { preHandler: auth }, async () => db.listWins());

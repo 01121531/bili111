@@ -12,7 +12,12 @@ import { getDynamicDetail } from './bili';
 export type EngineResult = { code: number; discovered: number; candidates: number; attempted: number; success: number; partial: number; failed: number; errors: number };
 
 function cleanRuntimeText(value: unknown, limit = 1000) {
-  return value === null || value === undefined ? null : String(value).replace(/(SESSDATA|bili_jct|DedeUserID|buvid3)=[^;\s]+/gi, '$1=••••••').slice(0, limit);
+  if (value === null || value === undefined) return null;
+  return String(value)
+    .replace(/(SESSDATA|bili_jct|DedeUserID|buvid3)=[^;\s]+/gi, '$1=••••••')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer ••••••')
+    .replace(/("?(?:csrf|api[_-]?key|authorization|smtp[_-]?(?:pass|password))"?\s*[:=]\s*)["']?[^,"'\s}\]]+/gi, '$1••••••')
+    .slice(0, limit);
 }
 
 export class EngineRunner {
@@ -113,7 +118,27 @@ export class EngineRunner {
           } else if (event.type === 'lottery_participation' && event.participation?.dyid) {
             const participation = event.participation; const dyid = String(participation.dyid);
             const cleanText = cleanRuntimeText;
-            const cleanAction = (value: any = {}) => ({ plannedText: cleanText(value.plannedText), actualText: cleanText(value.actualText), source: cleanText(value.source, 40) || 'none', status: cleanText(value.status, 40) || 'not_required', code: Number(value.code) || 0, reason: cleanText(value.reason, 500) || undefined });
+            const finiteNumber = (value: unknown) => { const number = Number(value); return Number.isFinite(number) ? number : null; };
+            const cleanAttempt = (value: any = {}) => ({
+              action: cleanText(value.action, 40) || undefined,
+              status: cleanText(value.status, 40) || 'failed',
+              internalCode: Number(value.internalCode) || 0,
+              providerCode: value.providerCode === null || value.providerCode === undefined ? null : finiteNumber(value.providerCode),
+              providerMessage: cleanText(value.providerMessage, 500),
+              errorType: cleanText(value.errorType, 40),
+              httpStatus: value.httpStatus === null || value.httpStatus === undefined ? null : finiteNumber(value.httpStatus),
+              transportCode: cleanText(value.transportCode, 80),
+              retryable: Boolean(value.retryable),
+              attemptNo: Math.max(1, Number(value.attemptNo) || 1),
+              targetId: cleanText(value.targetId, 100),
+              occurredAt: cleanText(value.occurredAt, 50) || undefined
+            });
+            const cleanAction = (value: any = {}) => ({
+              plannedText: cleanText(value.plannedText), actualText: cleanText(value.actualText), source: cleanText(value.source, 40) || 'none',
+              status: cleanText(value.status, 40) || 'not_required', code: Number(value.code) || 0,
+              reason: cleanText(value.reason, 500) || undefined,
+              attempts: Array.isArray(value.attempts) ? value.attempts.slice(0, 100).map(cleanAttempt) : []
+            });
             const overallStatus = ['success', 'partial', 'failed'].includes(String(participation.overallStatus)) ? String(participation.overallStatus) : 'failed';
             const record = this.db.upsertParticipation(account.id, runId, { dyid, overallStatus, resultCode: Number(participation.code) || 0, resultReason: cleanText(participation.reason, 500) || undefined, comment: cleanAction(participation.comment), follow: cleanAction(participation.follow), like: cleanAction(participation.like), relay: cleanAction(participation.relay), startedAt: cleanText(participation.startedAt, 50) || undefined, finishedAt: cleanText(participation.finishedAt, 50) || undefined });
             candidateIds.add(dyid); attemptedIds.add(dyid);
@@ -137,10 +162,24 @@ export class EngineRunner {
         catch { processErrors += 1; }
         return;
       }
-      const safe = message.replace(/(SESSDATA|bili_jct|DedeUserID|buvid3)=[^;\s]+/gi, '$1=••••••');
-      if (level === 'error' || /\[(?:Error|错误)\]/i.test(safe)) processErrors += 1;
+      let safe = cleanRuntimeText(message, 4000) || '';
+      let normalizedLevel = level;
+      if (/\[(?:Error|错误)\]/i.test(safe)) normalizedLevel = 'error';
+      else if (/\[(?:Warn|Warning|警告)\]/i.test(safe)) normalizedLevel = 'warn';
+      else if (/\[(?:Debug|调试)\]/i.test(safe)) normalizedLevel = 'debug';
+      if (/^\s*\{.*\}\s*$/.test(safe)) {
+        try {
+          const response = JSON.parse(safe);
+          if (Number.isFinite(Number(response?.code))) {
+            const providerMessage = cleanRuntimeText(response?.message, 500);
+            safe = `B站返回 ${Number(response.code)}${providerMessage ? `（${providerMessage}）` : ''}`;
+            if (Number(response.code) !== 0) normalizedLevel = 'error';
+          }
+        } catch { /* preserve non-JSON log text */ }
+      }
+      if (normalizedLevel === 'error') processErrors += 1;
       const context = safe.match(/\[帐号\d+ ([^\]]+)/)?.[1] || 'engine';
-      const log = this.db.addLog(runId, account.id, level, context, safe);
+      const log = this.db.addLog(runId, account.id, normalizedLevel, context, safe);
       this.emit({ type: 'log', payload: log });
     };
     const consume = (chunk: Buffer, level: string) => {
