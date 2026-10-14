@@ -227,6 +227,35 @@ test('历史评论补充候选按账号隔离且成功补充后不再出现', as
     item.db.upsertParticipation(first.id, fillRun, { dyid: '450000001', overallStatus: 'success', comment: { status: 'success', actualText: '补充评论', source: 'configured' } });
     assert.equal(item.db.listCommentBackfillCandidates(first.id, 20).length, 0);
     assert.equal(item.db.commentBackfillStats(first.id).success, 1);
+    const history: any = item.db.listRunParticipations(firstRun);
+    assert.equal(history.items[0].backfill_comment_status, 'success');
+    assert.equal(history.items[0].backfill_comment_text, '补充评论');
+    assert.equal(history.items[0].backfill_run_id, fillRun);
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});
+
+test('历史评论补充失败遵守 24 小时冷却和最多三次尝试', async () => {
+  const item = await databaseFixture();
+  try {
+    const account = item.db.createAccount({ uid: '7601', name: '重试账号', cookie: encrypt('DedeUserID=7601') })!;
+    const sourceRun = item.db.createRun(item.db.createJob(account.id, 'start').id, account.id);
+    item.db.upsertLottery(account.id, { dyid: '460000001', author: '作者', description: '评论参与', status: 'candidate', runId: sourceRun });
+    item.db.upsertParticipation(account.id, sourceRun, { dyid: '460000001', overallStatus: 'partial', comment: { status: 'failed', reason: '评论失败' }, follow: { status: 'success' } });
+    const start = Date.parse('2026-10-01T00:00:00.000Z');
+    assert.equal(item.db.listCommentBackfillCandidates(account.id, 20, start).length, 1);
+    let lastRun = 0;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const finishedAt = new Date(start + attempt * 25 * 3600000).toISOString();
+      const run = item.db.createRun(item.db.createJob(account.id, 'comment_backfill').id, account.id);
+      lastRun = run;
+      item.db.upsertParticipation(account.id, run, { dyid: '460000001', overallStatus: 'failed', comment: { status: 'failed', reason: `第${attempt + 1}次失败` }, finishedAt });
+      assert.equal(item.db.listCommentBackfillCandidates(account.id, 20, Date.parse(finishedAt) + 3600000).length, 0);
+      if (attempt < 2) assert.equal(item.db.listCommentBackfillCandidates(account.id, 20, Date.parse(finishedAt) + 25 * 3600000).length, 1);
+    }
+    const stats = item.db.commentBackfillStats(account.id, start + 75 * 3600000);
+    assert.equal(stats.pending, 0);
+    assert.equal(stats.finalFailed, 1);
+    assert.equal(Number(item.db.listCommentBackfillFailures(lastRun)[0].attempt_count), 3);
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
 

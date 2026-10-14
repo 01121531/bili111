@@ -4,6 +4,7 @@ import { AppDatabase, AccountRow } from './db';
 import { decrypt, encrypt } from './security';
 
 export type WinEventInput = { source?: string; actor?: string; content?: string; url?: string; occurredAt?: string };
+export type CommentBackfillFailureInput = { dyid: string; author?: string; url?: string; reason?: string; attemptCount?: number };
 export type RuntimeEvent = { type: 'wins_detected'; events: WinEventInput[] } | { type: 'account_invalid'; reason?: string } | { type: 'account_valid' };
 export type EmailConfig = {
   enabled: boolean;
@@ -76,6 +77,17 @@ function buildStatusEmail(account: AccountRow, type: 'account_invalid' | 'accoun
   const message = recovered ? '账号 Cookie 已重新验证成功，自动抽奖和中奖检测任务可以继续运行。' : '账号无法通过 B 站登录验证，请尽快在控制台重新扫码登录或更新 Cookie。';
   const html = layout(subject, message, `${summaryRows(account, detectedAt)}<div style="padding:16px;border-radius:7px;background:${background};color:${accent};font-size:14px;line-height:1.8"><strong>${escapeHtml(recovered ? '状态已恢复' : '需要处理')}</strong><br>${escapeHtml(message)}${reason ? `<br><span style="font-size:12px">原因：${escapeHtml(text(reason, '', 500))}</span>` : ''}</div>`);
   return { subject, html, text: `${subject}\n账号：${label}\nUID：${account.uid || '未识别'}\n时间：${displayTime(detectedAt)}\n${message}${reason ? `\n原因：${text(reason, '', 500)}` : ''}` };
+}
+
+export function buildCommentBackfillFailureEmail(account: AccountRow, failures: CommentBackfillFailureInput[], detectedAt = new Date().toISOString()): MailContent {
+  const label = accountLabel(account); const subject = `[B站抽奖] 账号“${label}”补充评论失败（${failures.length} 条）`;
+  const cards = failures.map(item => {
+    const attempt = Math.min(3, Math.max(1, Number(item.attemptCount) || 1)); const final = attempt >= 3; const url = safeBiliUrl(item.url);
+    return `<div style="border:1px solid #e3e9f0;border-radius:7px;padding:16px;margin:0 0 12px"><div style="font-weight:600;margin-bottom:7px">${escapeHtml(item.author || `动态 ${item.dyid}`)}</div><div style="font-size:13px;color:#445064;line-height:1.7">动态 ID：${escapeHtml(item.dyid)}<br>失败原因：${escapeHtml(text(item.reason, '未知错误', 500))}<br>尝试次数：${attempt}/3<br>后续处理：${escapeHtml(final ? '已达到重试上限，需要人工检查' : '将在至少 24 小时后自动重试')}</div>${url ? `<a href="${escapeHtml(url)}" style="display:inline-block;margin-top:12px;color:#087b7a;font-size:13px;font-weight:600">前往 B 站查看 →</a>` : ''}</div>`;
+  }).join('');
+  const html = layout(subject, `本次有 ${failures.length} 条补充评论未成功`, `${summaryRows(account, detectedAt)}<div style="padding:12px 14px;margin-bottom:18px;background:#fff0f2;border-left:3px solid #b4233c;color:#7b2032;font-size:13px;line-height:1.7">系统会保留已成功的评论。未达到 3 次上限的记录将在至少 24 小时后重试。</div>${cards}`);
+  const lines = failures.map((item, index) => { const attempt = Math.min(3, Math.max(1, Number(item.attemptCount) || 1)); return `${index + 1}. ${item.author || `动态 ${item.dyid}`}\n动态 ID：${item.dyid}\n原因：${text(item.reason, '未知错误', 500)}\n尝试：${attempt}/3\n${attempt >= 3 ? '已达到重试上限，需要人工检查' : '至少 24 小时后自动重试'}${safeBiliUrl(item.url) ? `\n${safeBiliUrl(item.url)}` : ''}`; }).join('\n\n');
+  return { subject, html, text: `${subject}\n账号：${label}\nUID：${account.uid || '未识别'}\n时间：${displayTime(detectedAt)}\n\n${lines}` };
 }
 
 function publicConfig(config: EmailConfig) { const { password, ...safe } = config; return { ...safe, passwordConfigured: Boolean(password) }; }
@@ -179,6 +191,10 @@ export class EmailNotificationService {
   }
   async notifyRecovery(account: AccountRow, runId?: number) { const config = this.read(); return config.enabled && config.notifyRecovery ? this.send('account_recovered', buildStatusEmail(account, 'account_recovered'), account.id, runId) : undefined; }
   async notifyWins(account: AccountRow, events: WinEventInput[], runId?: number) { const config = this.read(); return config.enabled && config.notifyWins && events.length ? this.send('win_detected', buildWinEmail(account, events), account.id, runId) : undefined; }
+  async notifyCommentBackfillFailures(account: AccountRow, failures: CommentBackfillFailureInput[], runId?: number) {
+    const config = this.read();
+    return config.enabled && failures.length ? this.send('comment_backfill_failed', buildCommentBackfillFailureEmail(account, failures), account.id, runId) : undefined;
+  }
 
   async handleRuntimeEvents(accountId: number, runId: number, events: RuntimeEvent[], log?: (level: string, message: string) => void) {
     for (const event of events) {

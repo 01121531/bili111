@@ -155,6 +155,12 @@ export class EngineRunner {
       consumeLine(stdoutBuffer, 'info'); consumeLine(stderrBuffer, 'error');
       const notificationLog = (level: string, message: string) => { const log = this.db.addLog(runId, account.id, level, '邮件通知', message); this.emit({ type: 'log', payload: log }); };
       void this.notifications.handleRuntimeEvents(account.id, runId, runtimeEvents, notificationLog).catch(error => notificationLog('error', `通知处理失败：${error instanceof Error ? error.message : String(error)}`));
+      if (mode === 'comment_backfill') {
+        const failures = this.db.listCommentBackfillFailures(runId).map(item => ({ dyid: String(item.dyid), author: String(item.author || ''), url: String(item.url || ''), reason: String(item.comment_reason || '补充评论失败'), attemptCount: Number(item.attempt_count) || 1 }));
+        if (failures.length) void this.notifications.notifyCommentBackfillFailures(account, failures, runId)
+          .then(result => { if (result) notificationLog(result.ok ? 'info' : 'error', result.ok ? `补充评论失败汇总邮件发送成功（${failures.length} 条）` : `补充评论失败汇总邮件发送失败：${result.error}`); })
+          .catch(error => notificationLog('error', `补充评论失败汇总邮件发送失败：${error instanceof Error ? error.message : String(error)}`));
+      }
       const cleanup = cleanupSummary as Record<string, any> | null;
       resolve({
         code: code ?? 1,

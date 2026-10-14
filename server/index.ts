@@ -34,6 +34,7 @@ function migrateLegacyCleanupDays() {
   }
 }
 migrateLegacyCleanupDays();
+db.normalizeForcedCommentConfig();
 try { const normalized = diffFromDefaults(readGlobalConfig()).diff; db.setSetting('global_config', JSON.stringify(normalized)); }
 catch { db.setSetting('global_config', '{}'); }
 const ai = new AiService(db);
@@ -156,8 +157,23 @@ app.post('/api/cleanup/run', { preHandler: auth }, async () => {
   const jobs = accounts.map(account => scheduler.enqueue(account.id, 'clear'));
   return { accepted: jobs.length > 0, jobs, accountCount: accounts.length, reason: jobs.length ? undefined : '没有启用的账号' };
 });
+function commentBackfillLimit(body: any) { return Math.min(100, Math.max(1, Number(body?.limit) || 20)); }
+function commentBackfillPreview(accountId: number, limit: number) {
+  return db.listCommentBackfillCandidates(accountId, limit).map(item => ({ dyid: item.dyid, author: item.author, description: item.description, url: item.url, originalParticipatedAt: item.finished_at, commentSource: '当前账号评论配置', attemptCount: Number(item.attempt_count) || 0, remainingAttempts: Math.max(0, 3 - (Number(item.attempt_count) || 0)) }));
+}
+app.get('/api/comment-backfill/status', { preHandler: auth }, async () => db.commentBackfillGlobalStats());
+app.post('/api/comment-backfill/preview', { preHandler: auth }, async request => {
+  const limit = commentBackfillLimit(request.body); const accounts = db.listAccounts().filter(account => account.enabled && account.cookie_status === 'valid');
+  const results = accounts.map(account => ({ accountId: account.id, accountName: account.note || account.name || `账号 ${account.id}`, items: commentBackfillPreview(account.id, limit) })).filter(item => item.items.length);
+  return { limit, accountCount: results.length, total: results.reduce((sum, item) => sum + item.items.length, 0), accounts: results };
+});
+app.post('/api/comment-backfill', { preHandler: auth }, async request => {
+  const limit = commentBackfillLimit(request.body); const accounts = db.listAccounts().filter(account => account.enabled && account.cookie_status === 'valid');
+  const jobs = accounts.filter(account => db.listCommentBackfillCandidates(account.id, 1).length > 0).map(account => scheduler.enqueue(account.id, 'comment_backfill', { limit }));
+  return { accepted: jobs.length > 0, limit, accountCount: jobs.length, jobs, reason: jobs.length ? undefined : '没有当前可补充的评论记录' };
+});
 app.get('/api/accounts/:id/comment-backfill/status', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return db.commentBackfillStats(id); });
-app.post('/api/accounts/:id/comment-backfill/preview', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const limit = Math.min(100, Math.max(1, Number((request.body as any)?.limit) || 20)); return { items: db.listCommentBackfillCandidates(id, limit).map(item => ({ dyid: item.dyid, author: item.author, description: item.description, url: item.url, originalParticipatedAt: item.finished_at, commentSource: '当前账号评论配置' })), limit }; });
+app.post('/api/accounts/:id/comment-backfill/preview', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const limit = commentBackfillLimit(request.body); return { items: commentBackfillPreview(id, limit), limit }; });
 app.post('/api/accounts/:id/comment-backfill', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const limit = Math.min(100, Math.max(1, Number((request.body as any)?.limit) || 20)); const candidates = db.listCommentBackfillCandidates(id, limit); if (!candidates.length) return { accepted: false, reason: '没有待补充评论的参与记录', pending: 0 }; return { accepted: true, limit, job: scheduler.enqueue(id, 'comment_backfill', { limit }) }; });
 app.post('/api/jobs/:id/cancel', { preHandler: auth }, async (request) => ({ ok: scheduler.cancel(parseId((request.params as any).id)) }));
 app.get('/api/jobs', { preHandler: auth }, async () => db.listJobs());

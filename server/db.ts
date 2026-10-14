@@ -97,6 +97,7 @@ export class AppDatabase {
     this.db.run('CREATE INDEX IF NOT EXISTS idx_lotteries_status ON lotteries(discovery_status,participation_status,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_records_run ON participation_records(run_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_records_lottery ON participation_records(lottery_id,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_records_account_dyid ON participation_records(account_id,dyid,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_cleanup_records_run ON cleanup_records(run_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_lotteries_cleanup_protection ON lotteries(account_id,source_created_at,participation_status)');
     this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_win_events_event_key ON win_events(event_key) WHERE event_key IS NOT NULL');
@@ -123,6 +124,32 @@ export class AppDatabase {
   deleteAccount(id: number) { this.run('DELETE FROM account_schedules WHERE account_id=?', [id]); this.run('DELETE FROM accounts WHERE id=?', [id]); }
   getConfig(id: number) { const row = this.row<{ config_json: string }>('SELECT config_json FROM account_configs WHERE account_id=?', [id]); return row ? JSON.parse(row.config_json) : {}; }
   setConfig(id: number, config: object) { this.run('INSERT INTO account_configs(account_id,config_json,updated_at) VALUES (?,?,?) ON CONFLICT(account_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at', [id, JSON.stringify(config), this.now()]); }
+  normalizeForcedCommentConfig() {
+    let changed = 0;
+    this.db.run('BEGIN');
+    try {
+      const globalRow = this.row<{ value: string }>("SELECT value FROM system_settings WHERE key='global_config'");
+      if (globalRow) {
+        let config: Record<string, unknown> = {};
+        try { config = JSON.parse(globalRow.value); } catch { config = {}; }
+        if (Object.prototype.hasOwnProperty.call(config, 'chatmodel')) {
+          delete config.chatmodel;
+          this.db.run("UPDATE system_settings SET value=? WHERE key='global_config'", [JSON.stringify(config)]);
+          changed += 1;
+        }
+      }
+      for (const row of this.rows<{ account_id: number; config_json: string }>('SELECT account_id,config_json FROM account_configs')) {
+        let config: Record<string, unknown> = {};
+        try { config = JSON.parse(row.config_json); } catch { config = {}; }
+        if (!Object.prototype.hasOwnProperty.call(config, 'chatmodel')) continue;
+        delete config.chatmodel;
+        this.db.run('UPDATE account_configs SET config_json=?,updated_at=? WHERE account_id=?', [JSON.stringify(config), this.now(), row.account_id]);
+        changed += 1;
+      }
+      this.db.run('COMMIT'); this.flush();
+    } catch (error) { this.db.run('ROLLBACK'); throw error; }
+    return changed;
+  }
   resetConfig(id: number) {
     const current = this.getConfig(id) as Record<string, unknown>;
     const next: Record<string, unknown> = {};
@@ -273,7 +300,22 @@ export class AppDatabase {
       const term = `%${query.search}%`; where.push('(p.dyid LIKE ? OR l.author LIKE ? OR l.description LIKE ? OR p.comment_text LIKE ? OR p.relay_text LIKE ?)'); params.push(term, term, term, term, term);
     }
     const clause = `WHERE ${where.join(' AND ')}`; const total = Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id ${clause}`, params)?.count || 0);
-    const items = this.rows(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,a.name account_name,r.status run_status,r.started_at run_started_at,j.type run_type FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id ${clause} ORDER BY p.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+    const items = this.rows<any>(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,a.name account_name,r.status run_status,r.started_at run_started_at,j.type run_type FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id ${clause} ORDER BY p.id DESC LIMIT ? OFFSET ?`, [...params, pageSize, (page - 1) * pageSize]);
+    for (const item of items) {
+      if (item.run_type === 'comment_backfill' || item.comment_status === 'success') continue;
+      const supplement = this.row<any>(`SELECT p.comment_status,p.comment_text,p.comment_source,p.comment_reason,p.run_id,p.finished_at
+        FROM participation_records p JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id
+        WHERE p.account_id=? AND p.dyid=? AND j.type='comment_backfill' AND p.comment_status='success'
+        ORDER BY p.id DESC LIMIT 1`, [item.account_id, item.dyid]);
+      if (supplement) {
+        item.backfill_comment_status = supplement.comment_status;
+        item.backfill_comment_text = supplement.comment_text;
+        item.backfill_comment_source = supplement.comment_source;
+        item.backfill_comment_reason = supplement.comment_reason;
+        item.backfill_run_id = supplement.run_id;
+        item.backfill_finished_at = supplement.finished_at;
+      }
+    }
     const summaryWhere = scope === 'run' ? 'p.run_id=?' : 'p.dyid=?'; const summaryValue = scope === 'run' ? id : this.row<any>('SELECT dyid FROM lotteries WHERE id=?', [id])?.dyid;
     const count = (status?: string) => Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p WHERE ${summaryWhere}${status ? ' AND p.overall_status=?' : ''}`, status ? [summaryValue, status] : [summaryValue])?.count || 0);
     return { items, page, pageSize, total, pages: Math.max(1, Math.ceil(total / pageSize)), summary: { attempted: count(), success: count('success'), partial: count('partial'), failed: count('failed') } };
@@ -281,25 +323,53 @@ export class AppDatabase {
   listRunParticipations(runId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('run', runId, query); }
   listLotteryParticipations(lotteryId: number, query: ParticipationQuery = {}) { return this.listParticipationRecords('lottery', lotteryId, query); }
   listLotteryBackfillCandidates(limit = 20) { return this.rows<any>("SELECT l.*,a.cookie,a.cookie_status FROM lotteries l JOIN accounts a ON a.id=l.account_id WHERE a.enabled=1 AND a.cookie_status!='invalid' AND l.enrichment_status!='failed' AND (l.description IS NULL OR l.description='' OR l.enrichment_status='pending') ORDER BY l.id LIMIT ?", [limit]); }
-  listCommentBackfillCandidates(accountId: number, limit = 20) {
-    return this.rows<any>(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,l.account_id,a.cookie,a.cookie_status
-      FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id
+  private commentBackfillRows(accountId: number) {
+    return this.rows<any>(`SELECT p.*,l.author,l.description,l.url,l.draw_time,l.source,l.account_id,a.cookie_status,
+      (SELECT COUNT(*) FROM participation_records bp JOIN runs br ON br.id=bp.run_id JOIN jobs bj ON bj.id=br.job_id WHERE bp.account_id=p.account_id AND bp.dyid=p.dyid AND bj.type='comment_backfill') attempt_count,
+      (SELECT MAX(bp.finished_at) FROM participation_records bp JOIN runs br ON br.id=bp.run_id JOIN jobs bj ON bj.id=br.job_id WHERE bp.account_id=p.account_id AND bp.dyid=p.dyid AND bj.type='comment_backfill') last_attempt_at,
+      (SELECT COUNT(*) FROM participation_records sp WHERE sp.account_id=p.account_id AND sp.dyid=p.dyid AND sp.comment_status='success') success_count
+      FROM participation_records p
+      JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id
+      JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id
       WHERE p.account_id=? AND a.enabled=1 AND a.cookie_status='valid'
-        AND p.run_id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND j.type!='discover')
+        AND j.type NOT IN ('discover','comment_backfill')
         AND p.overall_status IN ('success','partial')
-        AND p.comment_status IN ('not_required','not_attempted')
-        AND NOT EXISTS (SELECT 1 FROM participation_records p2 JOIN runs r2 ON r2.id=p2.run_id JOIN jobs j2 ON j2.id=r2.job_id WHERE p2.account_id=p.account_id AND p2.dyid=p.dyid AND j2.type='comment_backfill')
-      GROUP BY p.account_id,p.dyid ORDER BY MIN(p.id) ASC LIMIT ?`, [accountId, accountId, Math.min(100, Math.max(1, Number(limit) || 20))]);
+        AND p.comment_status IN ('not_required','not_attempted','failed')
+        AND p.id=(SELECT MIN(p0.id) FROM participation_records p0 JOIN runs r0 ON r0.id=p0.run_id JOIN jobs j0 ON j0.id=r0.job_id
+          WHERE p0.account_id=p.account_id AND p0.dyid=p.dyid AND j0.type NOT IN ('discover','comment_backfill')
+            AND p0.overall_status IN ('success','partial') AND p0.comment_status IN ('not_required','not_attempted','failed'))
+      ORDER BY p.id ASC`, [accountId]);
   }
-  commentBackfillStats(accountId: number) {
-    const pending = Number(this.row<any>(`SELECT COUNT(DISTINCT p.dyid) count FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id JOIN accounts a ON a.id=p.account_id
-      WHERE p.account_id=? AND a.enabled=1 AND a.cookie_status='valid' AND p.overall_status IN ('success','partial') AND p.comment_status IN ('not_required','not_attempted')
-      AND p.run_id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND j.type!='discover')
-      AND NOT EXISTS (SELECT 1 FROM participation_records p2 JOIN runs r2 ON r2.id=p2.run_id JOIN jobs j2 ON j2.id=r2.job_id WHERE p2.account_id=p.account_id AND p2.dyid=p.dyid AND j2.type='comment_backfill')`, [accountId, accountId])?.count || 0);
-    const success = Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p WHERE p.account_id=? AND p.comment_status='success' AND p.run_id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND j.type='comment_backfill')`, [accountId, accountId])?.count || 0);
-    const failed = Number(this.row<any>(`SELECT COUNT(*) count FROM participation_records p WHERE p.account_id=? AND p.comment_status='failed' AND p.run_id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id=r.job_id WHERE r.account_id=? AND j.type='comment_backfill')`, [accountId, accountId])?.count || 0);
+  listCommentBackfillCandidates(accountId: number, limit = 20, now = Date.now()) {
+    const cooldown = 24 * 3600000;
+    return this.commentBackfillRows(accountId).filter(row => {
+      const attempts = Number(row.attempt_count) || 0;
+      const lastAttempt = row.last_attempt_at ? new Date(row.last_attempt_at).getTime() : 0;
+      return Number(row.success_count) === 0 && attempts < 3 && (!lastAttempt || now - lastAttempt >= cooldown);
+    }).slice(0, Math.min(100, Math.max(1, Number(limit) || 20)));
+  }
+  commentBackfillStats(accountId: number, now = Date.now()) {
+    const rows = this.commentBackfillRows(accountId); const cooldown = 24 * 3600000;
+    const incomplete = rows.filter(row => Number(row.success_count) === 0);
+    const pending = incomplete.filter(row => { const attempts = Number(row.attempt_count) || 0; const last = row.last_attempt_at ? new Date(row.last_attempt_at).getTime() : 0; return attempts < 3 && (!last || now - last >= cooldown); }).length;
+    const retrying = incomplete.filter(row => { const attempts = Number(row.attempt_count) || 0; const last = row.last_attempt_at ? new Date(row.last_attempt_at).getTime() : 0; return attempts > 0 && attempts < 3 && last > 0 && now - last < cooldown; }).length;
+    const finalFailed = incomplete.filter(row => Number(row.attempt_count) >= 3).length;
+    const success = Number(this.row<any>(`SELECT COUNT(DISTINCT p.dyid) count FROM participation_records p JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id WHERE p.account_id=? AND j.type='comment_backfill' AND p.comment_status='success'`, [accountId])?.count || 0);
+    const shifted = new Date(now + 8 * 3600000); const todayStart = new Date(Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - 8 * 3600000).toISOString();
+    const todaySuccess = Number(this.row<any>(`SELECT COUNT(DISTINCT p.dyid) count FROM participation_records p JOIN runs r ON r.id=p.run_id JOIN jobs j ON j.id=r.job_id WHERE p.account_id=? AND j.type='comment_backfill' AND p.comment_status='success' AND p.finished_at>=?`, [accountId, todayStart])?.count || 0);
     const latestJob = this.row<any>("SELECT * FROM jobs WHERE account_id=? AND type='comment_backfill' ORDER BY id DESC LIMIT 1", [accountId]);
-    return { pending, success, failed, latestJob };
+    return { pending, retrying, finalFailed, failed: finalFailed, success, todaySuccess, latestJob };
+  }
+  commentBackfillGlobalStats(now = Date.now()) {
+    const accounts = this.listAccounts().filter(account => account.enabled && account.cookie_status === 'valid').map(account => ({ accountId: account.id, accountName: account.note || account.name || `账号 ${account.id}`, ...this.commentBackfillStats(account.id, now) }));
+    const total = (key: 'pending' | 'retrying' | 'finalFailed' | 'success' | 'todaySuccess') => accounts.reduce((sum, item) => sum + Number(item[key] || 0), 0);
+    return { accounts, pending: total('pending'), retrying: total('retrying'), finalFailed: total('finalFailed'), success: total('success'), todaySuccess: total('todaySuccess') };
+  }
+  listCommentBackfillFailures(runId: number) {
+    return this.rows<any>(`SELECT p.dyid,p.comment_reason,p.comment_code,p.finished_at,l.author,l.url,
+      (SELECT COUNT(*) FROM participation_records bp JOIN runs br ON br.id=bp.run_id JOIN jobs bj ON bj.id=br.job_id WHERE bp.account_id=p.account_id AND bp.dyid=p.dyid AND bj.type='comment_backfill') attempt_count
+      FROM participation_records p JOIN lotteries l ON l.id=p.lottery_id
+      WHERE p.run_id=? AND p.comment_status='failed' ORDER BY p.id`, [runId]);
   }
   listLotteryDrawTimeCandidates(limit = 500) { return this.rows<any>("SELECT * FROM lotteries WHERE draw_time IS NULL AND official=0 AND description IS NOT NULL AND description!='' ORDER BY id DESC LIMIT ?", [limit]); }
   cleanupProtection(accountId: number, cutoff: number) {

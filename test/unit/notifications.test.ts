@@ -138,3 +138,23 @@ test('账号测试邮件使用账号最终收件邮箱且不回显授权码', as
     assert.equal(item.db.listNotifications()[0].account_id, item.account.id);
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
+
+test('补充评论失败按账号汇总发送且标记重试次数', async () => {
+  const item = await fixture();
+  try {
+    item.service.saveAccountNotification(item.account.id, { recipient: 'account@example.com' });
+    const result = await item.service.notifyCommentBackfillFailures(item.account, [
+      { dyid: '10001', author: '活动方', url: 'https://www.bilibili.com/opus/10001', reason: '评论区关闭', attemptCount: 2 },
+      { dyid: '10002', reason: '动态不存在', attemptCount: 3 }
+    ], 9);
+    assert.equal(result?.ok, true);
+    assert.equal(item.sent.length, 1);
+    assert.equal(item.sent[0].to, 'account@example.com');
+    assert.match(String(item.sent[0].subject), /补充评论失败（2 条）/);
+    assert.match(String(item.sent[0].text), /尝试：2\/3/);
+    assert.match(String(item.sent[0].text), /已达到重试上限/);
+    const record: any = item.db.listNotifications()[0];
+    assert.equal(record.event_type, 'comment_backfill_failed');
+    assert.equal(record.run_id, 9);
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});

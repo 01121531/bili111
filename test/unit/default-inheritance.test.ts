@@ -39,7 +39,7 @@ test('默认账号配置按内置、默认和账号覆盖顺序合并', () => {
   assert.equal(runtime.config_7.uid_scan_page, 12);
   assert.equal(runtime.config_7.maxday, Infinity);
   assert.equal(runtime.default_config.chatmodel, '11');
-  assert.equal(mergedConfig({ chatmodel: '01' }).chatmodel, '01');
+  assert.equal(mergedConfig({ chatmodel: '01' }).chatmodel, '11');
 });
 
 test('恢复默认和应用到全部账号只清除业务覆盖并保留 AI', async () => {
@@ -58,7 +58,7 @@ test('恢复默认和应用到全部账号只清除业务覆盖并保留 AI', as
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
 
-test('新账号继承四项默认计划，默认变化不覆盖独立计划', async () => {
+test('新账号继承五项默认计划，默认变化不覆盖独立计划', async () => {
   const item = await databaseFixture();
   let service: AccountScheduleService | undefined;
   try {
@@ -69,10 +69,13 @@ test('新账号继承四项默认计划，默认变化不覆盖独立计划', as
 
     const independentRows = service.listAccount(independent.id);
     const inheritedRows = service.listAccount(inherited.id);
-    assert.equal(independentRows.length, 4);
-    assert.equal(inheritedRows.length, 4);
+    assert.equal(independentRows.length, 5);
+    assert.equal(inheritedRows.length, 5);
     assert.equal(independentRows.find(row => row.type === 'start')?.is_override, 1);
     assert.equal(inheritedRows.every(row => row.is_override === 0), true);
+    const commentSchedule = inheritedRows.find(row => row.type === 'comment_backfill');
+    assert.equal(commentSchedule?.cron, '0 4 * * *');
+    assert.equal(commentSchedule?.enabled, 1);
 
     service.saveDefaults({ start: { cron: '0 10 * * *', enabled: true } });
     assert.equal(service.listAccount(independent.id).find(row => row.type === 'start')?.cron, '0 7 * * *');
@@ -127,4 +130,17 @@ test('默认计划校验拒绝无效 Cron，并按北京时间计算下次运行
   const defaults = validateScheduleDefaults({}, builtInScheduleDefaults);
   assert.deepEqual(defaults, builtInScheduleDefaults);
   assert.equal(nextScheduleRun('0 9 * * *', new Date('2026-01-01T00:30:00.000Z')), '2026-01-01T01:00:00.000Z');
+});
+
+test('强制评论迁移清除旧覆盖并保留 AI 与通知配置', async () => {
+  const item = await databaseFixture();
+  try {
+    const account = item.db.createAccount({ uid: '9001', cookie: 'cookie' })!;
+    item.db.setSetting('global_config', JSON.stringify({ chatmodel: '01', uid_scan_page: 8 }));
+    item.db.setConfig(account.id, { chatmodel: '00', ai: { enableComments: true }, notifications: { recipient: 'test@example.com' } });
+    assert.equal(item.db.normalizeForcedCommentConfig(), 2);
+    assert.deepEqual(JSON.parse(item.db.getSetting('global_config') || '{}'), { uid_scan_page: 8 });
+    assert.deepEqual(item.db.getConfig(account.id), { ai: { enableComments: true }, notifications: { recipient: 'test@example.com' } });
+    assert.equal(mergedConfig(item.db.getConfig(account.id), JSON.parse(item.db.getSetting('global_config') || '{}')).chatmodel, '11');
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });

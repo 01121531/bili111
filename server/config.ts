@@ -43,7 +43,7 @@ export const configFields: ConfigField[] = [
 
   list('key_words', 'rules', '抽奖关键词规则', '每行一条正则规则，动态需同时满足。'),
   { key: 'model', category: 'rules', label: '自动参与范围', description: '分别控制官方与非官方抽奖是否参与。', type: 'mode' },
-  { key: 'chatmodel', category: 'rules', label: '自动评论范围', description: '分别控制官方与非官方抽奖是否评论。', type: 'mode' },
+  { key: 'chatmodel', category: 'rules', label: '自动评论范围', description: '网站管理的账号固定对官方和非官方抽奖发表评论。', type: 'mode', readOnly: true },
   toggle('disable_reserve_lottery', 'rules', '不参与预约抽奖', '开启后跳过所有预约抽奖。'),
   toggle('is_not_relay_reserve_lottery', 'rules', '预约抽奖不转发关注', '预约抽奖可能与转发抽奖同时存在。'),
   { key: 'check_if_duplicated', category: 'rules', label: '重复参与检查', description: '选择判断是否已经参与的方法。', type: 'select', options: [
@@ -147,7 +147,7 @@ function businessConfig(value: Record<string, unknown> = {}) {
 }
 
 export function mergedConfig(override: Record<string, unknown> = {}, inherited: Record<string, unknown> = {}) {
-  return toRuntimeConfig({ ...clone(defaultConfig), ...businessConfig(inherited), ...businessConfig(override) });
+  return toRuntimeConfig({ ...clone(defaultConfig), ...businessConfig(inherited), ...businessConfig(override), chatmodel: '11' });
 }
 
 function sanitizeField(field: ConfigField, value: unknown) {
@@ -211,6 +211,7 @@ export function validateWebConfig(input: unknown) {
     else if (internalKeys.has(key)) continue;
     else effective[key] = clone(value);
   }
+  effective.chatmodel = '11';
   const order = effective.LotteryOrder as number[];
   if (!order.length) throw new Error('至少启用一个抽奖来源');
   return effective;

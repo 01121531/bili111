@@ -2,7 +2,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { AppDatabase, ScheduleSeed } from './db';
 import { SerialScheduler } from './scheduler';
 
-export const scheduleJobTypes = ['start', 'check', 'clear', 'account'] as const;
+export const scheduleJobTypes = ['start', 'check', 'clear', 'account', 'comment_backfill'] as const;
 export type ScheduleJobType = typeof scheduleJobTypes[number];
 export type ScheduleTemplate = Record<ScheduleJobType, { cron: string; enabled: boolean }>;
 
@@ -10,7 +10,8 @@ export const builtInScheduleDefaults: ScheduleTemplate = {
   start: { cron: '0 */6 * * *', enabled: false },
   check: { cron: '*/30 * * * *', enabled: false },
   clear: { cron: '0 3 * * *', enabled: false },
-  account: { cron: '0 8 * * *', enabled: false }
+  account: { cron: '0 8 * * *', enabled: false },
+  comment_backfill: { cron: '0 4 * * *', enabled: true }
 };
 
 export function nextScheduleRun(cron: string, from = new Date()) {
@@ -106,7 +107,8 @@ export class AccountScheduleService {
       const now = new Date();
       for (const schedule of this.db.listDueSchedules(now.toISOString())) {
         const account = this.db.getAccount(schedule.account_id);
-        const job = account?.enabled ? this.scheduler.enqueue(schedule.account_id, schedule.type) : null;
+        const hasWork = schedule.type !== 'comment_backfill' || this.db.listCommentBackfillCandidates(schedule.account_id, 1).length > 0;
+        const job = account?.enabled && hasWork ? this.scheduler.enqueue(schedule.account_id, schedule.type, schedule.type === 'comment_backfill' ? { limit: 20 } : undefined) : null;
         this.db.markScheduleTriggered(schedule.id, job?.id || null, nextScheduleRun(schedule.cron, now));
       }
     } finally { this.checking = false; }
