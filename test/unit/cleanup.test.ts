@@ -60,13 +60,33 @@ test('数据库按账号提供活跃 UP 保护并保存清理审计', async () =
   const protection = db.cleanupProtection(account.id, 1_000_000);
   assert.deepEqual(protection.uids, ['9001']);
   assert.equal(protection.unresolved, true);
+  assert.deepEqual(protection.unresolvedItems.map((item: any) => item.dyid), ['d2']);
 
   const job = db.createJob(account.id, 'clear_preview');
   const runId = db.createRun(job.id, account.id);
   db.addCleanupRecord(runId, account.id, { action: 'dynamic_delete', targetId: 'd1', status: 'candidate', reason: '发布已满 30 天' });
-  db.upsertCleanupSummary(runId, account.id, { preview: true, thresholdDays: 30, scannedCount: 10, expiredCount: 1, deleteCandidateCount: 1 });
+  db.upsertCleanupSummary(runId, account.id, {
+    preview: true,
+    thresholdDays: 30,
+    scannedCount: 10,
+    expiredCount: 1,
+    deleteCandidateCount: 1,
+    partitionNames: ['抽奖分组'],
+    resolvedPartitions: [{ name: '抽奖分组', tagid: 7, count: 12 }],
+    missingPartitions: ['缺失分组'],
+    unresolvedActiveCount: 1,
+    unresolvedActiveItems: [{ dyid: 'd2', reason: '动态不可访问' }],
+    authorUidEnrichedCount: 2,
+    authorUidEnrichmentFailedCount: 1
+  });
   const audit = db.getRunCleanup(runId);
   assert.equal(audit.summary.preview, 1);
   assert.equal(audit.summary.scanned_count, 10);
+  assert.deepEqual(audit.summary.partition_names, ['抽奖分组']);
+  assert.deepEqual(audit.summary.resolved_partitions, [{ name: '抽奖分组', tagid: 7, count: 12 }]);
+  assert.deepEqual(audit.summary.missing_partitions, ['缺失分组']);
+  assert.deepEqual(audit.summary.unresolved_active_items, [{ dyid: 'd2', reason: '动态不可访问' }]);
+  assert.equal(audit.summary.author_uid_enriched_count, 2);
+  assert.equal(audit.summary.author_uid_enrichment_failed_count, 1);
   assert.equal(audit.records[0].target_id, 'd1');
 });

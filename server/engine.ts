@@ -7,6 +7,7 @@ import { mergedConfig, runtimeConfig, stringifyRuntimeConfig } from './config';
 import { AiService } from './ai';
 import { EmailNotificationService, RuntimeEvent } from './notifications';
 import { parseDrawTime } from './lottery-enricher';
+import { getDynamicDetail } from './bili';
 
 export type EngineResult = { code: number; discovered: number; candidates: number; attempted: number; success: number; partial: number; failed: number; errors: number };
 
@@ -18,7 +19,7 @@ export class EngineRunner {
   processes = new Map<number, ChildProcessWithoutNullStreams>();
   constructor(private db: AppDatabase, private emit: (event: object) => void, private ai: AiService, private notifications: EmailNotificationService) {}
 
-  run(jobId: number, runId: number, account: AccountRow, mode: string, config: Record<string, unknown>, options: Record<string, unknown> = {}): Promise<EngineResult> {
+  async run(jobId: number, runId: number, account: AccountRow, mode: string, config: Record<string, unknown>, options: Record<string, unknown> = {}): Promise<EngineResult> {
     const cliMode = mode === 'discover' ? 'start' : mode === 'clear_preview' ? 'clear' : mode;
     const runtimePath = join(process.cwd(), 'my_config.js');
     const aiConfig = this.ai.resolve(account.id);
@@ -26,7 +27,24 @@ export class EngineRunner {
     try { inheritedConfig = JSON.parse(this.db.getSetting('global_config') || '{}'); } catch { inheritedConfig = {}; }
     const effectiveConfig = mergedConfig(config, inheritedConfig);
     const cleanupDays = Math.max(1, Math.min(3650, Math.round(Number(effectiveConfig.clear_max_day) || 30)));
-    const cleanupProtection = this.db.cleanupProtection(account.id, Math.floor(Date.now() / 1000) - cleanupDays * 86400);
+    const cleanupCutoff = Math.floor(Date.now() / 1000) - cleanupDays * 86400;
+    let cleanupProtection = this.db.cleanupProtection(account.id, cleanupCutoff);
+    let authorUidEnrichedCount = 0;
+    const authorUidFailures: Array<{ dyid: string; reason: string }> = [];
+    const rawCookie = decrypt(account.cookie);
+    if ((mode === 'clear' || mode === 'clear_preview') && cleanupProtection.unresolvedItems.length) {
+      for (const item of cleanupProtection.unresolvedItems) {
+        const result = await getDynamicDetail(rawCookie, item.dyid);
+        if (result.ok && result.detail.authorUid) {
+          this.db.upsertLottery(account.id, { dyid: item.dyid, author: result.detail.author, authorUid: result.detail.authorUid, description: result.detail.description || undefined, official: result.detail.official, sourceCreatedAt: result.detail.sourceCreatedAt, url: result.detail.url, enrichmentStatus: 'complete' });
+          authorUidEnrichedCount += 1;
+        } else {
+          authorUidFailures.push({ dyid: item.dyid, reason: cleanRuntimeText(result.ok ? '动态详情仍缺少作者 UID' : result.error, 180) || '无法读取动态详情' });
+          if (!result.ok && result.risk) break;
+        }
+      }
+      cleanupProtection = this.db.cleanupProtection(account.id, cleanupCutoff);
+    }
     writeFileSync(runtimePath, `module.exports = ${stringifyRuntimeConfig(runtimeConfig(account.id, config, aiConfig, inheritedConfig))};\n`, 'utf8');
     const aiEnv = {
       AI_API_KEY: aiConfig.apiKey || '',
@@ -46,7 +64,7 @@ export class EngineRunner {
       cwd: process.cwd(),
       env: {
         ...process.env,
-        COOKIE: decrypt(account.cookie),
+        COOKIE: rawCookie,
         NUMBER: String(account.id),
         LOTTERY_ACCOUNT_SCOPE: String(account.id),
         LOTTERY_LOG_LEVEL: '3',
@@ -56,6 +74,9 @@ export class EngineRunner {
         WEB_MANAGED_CLEAR: '1',
         CLEANUP_ACTIVE_UP_UIDS: JSON.stringify(cleanupProtection.uids),
         CLEANUP_UNRESOLVED_ACTIVE: cleanupProtection.unresolved ? '1' : '',
+        CLEANUP_UNRESOLVED_ACTIVE_ITEMS: JSON.stringify(cleanupProtection.unresolvedItems.map(item => ({ dyid: item.dyid, reason: authorUidFailures.find(failure => failure.dyid === item.dyid)?.reason || '无法确认作者 UID' }))),
+        CLEANUP_AUTHOR_UID_ENRICHED_COUNT: String(authorUidEnrichedCount),
+        CLEANUP_AUTHOR_UID_ENRICHMENT_FAILED_COUNT: String(cleanupProtection.unresolvedItems.length),
         COMMENT_BACKFILL_ITEMS: mode === 'comment_backfill' ? JSON.stringify(commentItems.map(item => ({ dyid: String(item.dyid), author: String(item.author || ''), description: String(item.description || ''), url: String(item.url || '') }))) : '',
         WEB_MANAGED_NOTIFICATIONS: '1',
         ...aiEnv

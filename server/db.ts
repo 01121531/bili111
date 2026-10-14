@@ -80,6 +80,13 @@ export class AppDatabase {
     this.addColumn('runs', 'failed_count INTEGER NOT NULL DEFAULT 0');
     this.addColumn('jobs', 'options_json TEXT');
     this.addColumn('account_schedules', 'is_override INTEGER NOT NULL DEFAULT 1');
+    this.addColumn('cleanup_summaries', 'partition_names TEXT');
+    this.addColumn('cleanup_summaries', 'resolved_partitions TEXT');
+    this.addColumn('cleanup_summaries', 'missing_partitions TEXT');
+    this.addColumn('cleanup_summaries', 'unresolved_active_count INTEGER NOT NULL DEFAULT 0');
+    this.addColumn('cleanup_summaries', 'unresolved_active_items TEXT');
+    this.addColumn('cleanup_summaries', 'author_uid_enriched_count INTEGER NOT NULL DEFAULT 0');
+    this.addColumn('cleanup_summaries', 'author_uid_enrichment_failed_count INTEGER NOT NULL DEFAULT 0');
     this.db.run("UPDATE lotteries SET source='legacy' WHERE source IN ('start','discover')");
     this.db.run("UPDATE lotteries SET discovery_status=CASE WHEN status='candidate' THEN 'candidate' WHEN status='filtered' THEN 'filtered' WHEN status IN ('participated','failed') THEN 'candidate' ELSE 'pending' END WHERE discovery_status='pending'");
     this.db.run("UPDATE lotteries SET participation_status='participated',participated_at=COALESCE(participated_at,updated_at,created_at),participation_result=COALESCE(participation_result,result_reason) WHERE status='participated' AND participation_status='not_attempted'");
@@ -296,9 +303,10 @@ export class AppDatabase {
   }
   listLotteryDrawTimeCandidates(limit = 500) { return this.rows<any>("SELECT * FROM lotteries WHERE draw_time IS NULL AND official=0 AND description IS NOT NULL AND description!='' ORDER BY id DESC LIMIT ?", [limit]); }
   cleanupProtection(accountId: number, cutoff: number) {
-    const rows = this.rows<any>("SELECT author_uid FROM lotteries WHERE account_id=? AND source_created_at>? AND participation_status IN ('participated','already_participated','partial')", [accountId, cutoff]);
+    const rows = this.rows<any>("SELECT id,dyid,author_uid,url FROM lotteries WHERE account_id=? AND source_created_at>? AND participation_status IN ('participated','already_participated','partial')", [accountId, cutoff]);
     const uids = [...new Set(rows.map(row => String(row.author_uid || '').trim()).filter(Boolean))];
-    return { uids, unresolved: rows.some(row => !String(row.author_uid || '').trim()) };
+    const unresolvedItems = rows.filter(row => !String(row.author_uid || '').trim()).map(row => ({ id: Number(row.id), dyid: String(row.dyid), url: String(row.url || '') }));
+    return { uids, unresolved: unresolvedItems.length > 0, unresolvedItems };
   }
   addCleanupRecord(runId: number, accountId: number, input: { action: string; targetId: string; relatedUid?: string | null; dynamicCreatedAt?: number | null; inferredExpiredAt?: number | null; status: string; reason?: string | null }) {
     const id = this.insert('INSERT INTO cleanup_records(run_id,account_id,action,target_id,related_uid,dynamic_created_at,inferred_expired_at,status,reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)', [runId, accountId, input.action, input.targetId, input.relatedUid || null, input.dynamicCreatedAt || null, input.inferredExpiredAt || null, input.status, input.reason || null, this.now()]);
@@ -306,13 +314,17 @@ export class AppDatabase {
   }
   upsertCleanupSummary(runId: number, accountId: number, input: Record<string, any>) {
     const now = this.now();
-    this.run(`INSERT INTO cleanup_summaries(run_id,account_id,preview,threshold_days,scanned_count,relevant_count,active_count,expired_count,protected_up_count,delete_candidate_count,delete_success_count,delete_failed_count,unfollow_candidate_count,unfollow_success_count,unfollow_failed_count,unfollow_blocked_reason,created_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(run_id) DO UPDATE SET preview=excluded.preview,threshold_days=excluded.threshold_days,scanned_count=excluded.scanned_count,relevant_count=excluded.relevant_count,active_count=excluded.active_count,expired_count=excluded.expired_count,protected_up_count=excluded.protected_up_count,delete_candidate_count=excluded.delete_candidate_count,delete_success_count=excluded.delete_success_count,delete_failed_count=excluded.delete_failed_count,unfollow_candidate_count=excluded.unfollow_candidate_count,unfollow_success_count=excluded.unfollow_success_count,unfollow_failed_count=excluded.unfollow_failed_count,unfollow_blocked_reason=excluded.unfollow_blocked_reason,updated_at=excluded.updated_at`, [runId, accountId, input.preview ? 1 : 0, Number(input.thresholdDays) || 30, Number(input.scannedCount) || 0, Number(input.relevantCount) || 0, Number(input.activeCount) || 0, Number(input.expiredCount) || 0, Number(input.protectedUpCount) || 0, Number(input.deleteCandidateCount) || 0, Number(input.deleteSuccessCount) || 0, Number(input.deleteFailedCount) || 0, Number(input.unfollowCandidateCount) || 0, Number(input.unfollowSuccessCount) || 0, Number(input.unfollowFailedCount) || 0, input.unfollowBlockedReason || null, now, now]);
+    this.run(`INSERT INTO cleanup_summaries(run_id,account_id,preview,threshold_days,scanned_count,relevant_count,active_count,expired_count,protected_up_count,delete_candidate_count,delete_success_count,delete_failed_count,unfollow_candidate_count,unfollow_success_count,unfollow_failed_count,unfollow_blocked_reason,partition_names,resolved_partitions,missing_partitions,unresolved_active_count,unresolved_active_items,author_uid_enriched_count,author_uid_enrichment_failed_count,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(run_id) DO UPDATE SET preview=excluded.preview,threshold_days=excluded.threshold_days,scanned_count=excluded.scanned_count,relevant_count=excluded.relevant_count,active_count=excluded.active_count,expired_count=excluded.expired_count,protected_up_count=excluded.protected_up_count,delete_candidate_count=excluded.delete_candidate_count,delete_success_count=excluded.delete_success_count,delete_failed_count=excluded.delete_failed_count,unfollow_candidate_count=excluded.unfollow_candidate_count,unfollow_success_count=excluded.unfollow_success_count,unfollow_failed_count=excluded.unfollow_failed_count,unfollow_blocked_reason=excluded.unfollow_blocked_reason,partition_names=excluded.partition_names,resolved_partitions=excluded.resolved_partitions,missing_partitions=excluded.missing_partitions,unresolved_active_count=excluded.unresolved_active_count,unresolved_active_items=excluded.unresolved_active_items,author_uid_enriched_count=excluded.author_uid_enriched_count,author_uid_enrichment_failed_count=excluded.author_uid_enrichment_failed_count,updated_at=excluded.updated_at`, [runId, accountId, input.preview ? 1 : 0, Number(input.thresholdDays) || 30, Number(input.scannedCount) || 0, Number(input.relevantCount) || 0, Number(input.activeCount) || 0, Number(input.expiredCount) || 0, Number(input.protectedUpCount) || 0, Number(input.deleteCandidateCount) || 0, Number(input.deleteSuccessCount) || 0, Number(input.deleteFailedCount) || 0, Number(input.unfollowCandidateCount) || 0, Number(input.unfollowSuccessCount) || 0, Number(input.unfollowFailedCount) || 0, input.unfollowBlockedReason || null, JSON.stringify(input.partitionNames || []), JSON.stringify(input.resolvedPartitions || []), JSON.stringify(input.missingPartitions || []), Number(input.unresolvedActiveCount) || 0, JSON.stringify(input.unresolvedActiveItems || []), Number(input.authorUidEnrichedCount) || 0, Number(input.authorUidEnrichmentFailedCount) || 0, now, now]);
     return this.row<any>('SELECT * FROM cleanup_summaries WHERE run_id=?', [runId]);
   }
   getRunCleanup(runId: number) {
-    return { summary: this.row<any>('SELECT * FROM cleanup_summaries WHERE run_id=?', [runId]) || null, records: this.rows<any>('SELECT * FROM cleanup_records WHERE run_id=? ORDER BY id', [runId]) };
+    const summary = this.row<any>('SELECT * FROM cleanup_summaries WHERE run_id=?', [runId]) || null;
+    if (summary) for (const key of ['partition_names', 'resolved_partitions', 'missing_partitions', 'unresolved_active_items']) {
+      try { summary[key] = JSON.parse(summary[key] || '[]'); } catch { summary[key] = []; }
+    }
+    return { summary, records: this.rows<any>('SELECT * FROM cleanup_records WHERE run_id=? ORDER BY id', [runId]) };
   }
   lotteryBackfillStats() { const total = Number(this.row<any>('SELECT COUNT(*) count FROM lotteries')?.count || 0); const pending = Number(this.row<any>("SELECT COUNT(*) count FROM lotteries WHERE enrichment_status!='failed' AND (description IS NULL OR description='' OR enrichment_status='pending')")?.count || 0); const failed = Number(this.row<any>("SELECT COUNT(*) count FROM lotteries WHERE enrichment_status='failed'")?.count || 0); return { total, pending, failed, complete: Math.max(0, total - pending - failed) }; }
   listWins(limit = 100) { return this.rows('SELECT w.*,a.name account_name FROM win_events w JOIN accounts a ON a.id=w.account_id ORDER BY w.id DESC LIMIT ?', [limit]); }

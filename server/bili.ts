@@ -29,6 +29,31 @@ export async function verifyBiliCookie(cookie: string) {
   }
 }
 
+export type RelationTag = { tagid: number; name: string; count: number };
+
+export async function listRelationTags(cookie: string) {
+  try {
+    const response = await json('https://api.bilibili.com/x/relation/tags', {
+      headers: { ...headers(cookie), 'user-agent': 'Mozilla/5.0', referer: 'https://www.bilibili.com/' }
+    });
+    if (response.data?.code === -101) return { ok: false as const, kind: 'invalid' as const, error: '账号 Cookie 已失效，请重新扫码登录' };
+    if (response.status === 429 || response.status === 412 || response.data?.code === -412 || response.data?.code === -352) {
+      return { ok: false as const, kind: 'rate_limited' as const, error: 'B 站访问频率受限，请稍后重试' };
+    }
+    if (!response.ok || response.data?.code !== 0 || !Array.isArray(response.data?.data)) {
+      return { ok: false as const, kind: 'service' as const, error: response.data?.message || `关注分组接口返回 HTTP ${response.status}` };
+    }
+    const partitions: RelationTag[] = response.data.data.map((item: any) => ({
+      tagid: Number(item?.tagid),
+      name: String(item?.name || '').trim(),
+      count: Math.max(0, Number(item?.count) || 0)
+    })).filter((item: RelationTag) => Number.isFinite(item.tagid) && item.name);
+    return { ok: true as const, partitions };
+  } catch (error) {
+    return { ok: false as const, kind: 'network' as const, error: safeError(error) };
+  }
+}
+
 function dynamicText(item: any) {
   let value = item?.modules?.module_dynamic?.major?.archive?.desc || '';
   const nodes = item?.modules?.module_dynamic?.desc?.rich_text_nodes || item?.modules?.module_dynamic?.major?.opus?.summary?.rich_text_nodes || [];

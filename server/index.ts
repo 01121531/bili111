@@ -6,8 +6,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { AppDatabase } from './db';
-import { encrypt, verifyPassword } from './security';
-import { createQrSession, pollQrSession, verifyBiliCookie } from './bili';
+import { decrypt, encrypt, verifyPassword } from './security';
+import { createQrSession, listRelationTags, pollQrSession, verifyBiliCookie } from './bili';
 import { SerialScheduler } from './scheduler';
 import { diffFromBase, diffFromDefaults, publicConfigPayload } from './config';
 import { UpdateService } from './updater';
@@ -117,6 +117,16 @@ app.put('/api/cleanup/config', { preHandler: auth }, async (request, reply) => {
 });
 app.get('/api/accounts/:id/cleanup/config', { preHandler: auth }, async (request, reply) => {
   const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return cleanupPayload('account', id);
+});
+app.get('/api/accounts/:id/cleanup/partitions', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id);
+  const account = db.getAccount(id);
+  if (!account) return reply.code(404).send({ error: '账号不存在' });
+  if (account.cookie_status === 'invalid') return reply.code(400).send({ error: '账号 Cookie 已失效，请重新扫码登录' });
+  const result = await listRelationTags(decrypt(account.cookie));
+  if (!result.ok) return reply.code(result.kind === 'invalid' ? 400 : result.kind === 'rate_limited' ? 429 : 502).send({ error: result.error, kind: result.kind });
+  const selected = new Set(String(cleanupPayload('account', id).effective.clear_partition || '').split(/[,，]+/).map(item => item.trim()).filter(Boolean));
+  return { accountId: id, partitions: result.partitions.map(item => ({ ...item, selected: selected.has(item.name) })), selectedNames: [...selected] };
 });
 app.put('/api/accounts/:id/cleanup/config', { preHandler: auth }, async (request, reply) => {
   const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });

@@ -331,6 +331,26 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
 .cleanup-form label > span { font-weight: 700; }
 .cleanup-form label > small, .cleanup-schedule small { color: var(--text-muted); line-height: 1.5; }
 .cleanup-form .wide { grid-column: 1 / -1; }
+.partition-field { display: grid; gap: 12px; }
+.partition-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.partition-heading > div { display: grid; gap: 5px; }
+.partition-heading small, .partition-empty { color: var(--text-muted); line-height: 1.5; }
+.partition-selected { min-height: 46px; padding: 8px 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.partition-selected > span { color: var(--text-muted); font-size: .83rem; }
+.partition-selected button { min-height: 30px; padding: 3px 9px; display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--primary); border-radius: 15px; background: var(--primary-soft); color: var(--primary); }
+.partition-options { max-height: 240px; overflow-y: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.partition-options label { min-height: 48px; padding: 8px 10px; display: flex; grid-template-columns: auto 1fr; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+.partition-options label.selected { border-color: var(--primary); background: var(--primary-soft); }
+.partition-options label > span { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.partition-options small { color: var(--text-muted); white-space: nowrap; }
+.partition-error { min-height: 46px; padding: 9px 11px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--danger); border-radius: 6px; background: var(--danger-soft); color: var(--danger); }
+.partition-error button { min-height: 32px; padding: 4px 10px; border: 1px solid currentColor; border-radius: 5px; background: transparent; color: inherit; }
+.partition-empty { padding: 14px; border: 1px dashed var(--border-strong); border-radius: 6px; }
+.cleanup-result-details { padding: 14px 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; border-bottom: 1px solid var(--border); }
+.cleanup-result-details > div { display: grid; gap: 4px; }
+.cleanup-result-details span { color: var(--text-muted); font-size: .83rem; }
+.warning-banner { margin: 14px 18px; padding: 12px 14px; border: 1px solid var(--warning); border-radius: 6px; background: var(--warning-soft); }
+.warning-banner ul { margin: 8px 0 0 20px; color: var(--text-muted); }
 .cleanup-switches { border-top: 1px solid var(--border); }
 .cleanup-switches > div { min-height: 74px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); }
 .cleanup-switches > div:last-child { border-bottom: 0; }
@@ -478,6 +498,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
   .config-nav button { text-align: center; }
   .toggle-list.horizontal { grid-template-columns: repeat(2, 1fr); }
   .version-grid { grid-template-columns: repeat(2, 1fr); }
+  .cleanup-result-details { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 767px) {
@@ -504,6 +525,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
   .cleanup-scope-bar { align-items: stretch; }
   .cleanup-scope-bar label { width: 100%; margin-left: 0; justify-content: space-between; }
   .cleanup-scope-bar select { width: 65%; }
+  .partition-heading { align-items: stretch; flex-direction: column; }
+  .partition-options { grid-template-columns: 1fr; }
   .cleanup-form { grid-template-columns: 1fr; padding: 14px; }
   .cleanup-form .wide { grid-column: auto; }
   .cleanup-actions { display: grid; }
