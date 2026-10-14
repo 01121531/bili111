@@ -773,8 +773,22 @@ export class DailyBiliClient {
       const totalPage = Math.max(1, Number(reply.data?.totalPage) || 1);
       if (page >= totalPage || list.length === 0) break;
     }
-    const rooms = [...discovered];
-    await report('live_room_discovery', '', rooms.length ? { status: 'success', reason: `自动发现 ${rooms.length} 个正在直播的关注 UP 主房间`, providerCode: 0 } : { status: 'skipped', reason: '未发现正在直播的关注 UP 主房间', providerCode: 0 });
+    const followedCount = discovered.size;
+    const index = await this.get<any>(`${LIVE}/xlive/web-interface/v1/index/getList?platform=web`, 'https://live.bilibili.com', 'https://live.bilibili.com/');
+    if (index.ok) {
+      const groups = Array.isArray(index.data?.room_list) ? index.data.room_list : [];
+      for (const group of groups) for (const room of Array.isArray(group?.list) ? group.list : []) {
+        if (room?.is_ad) continue;
+        const roomId = String(room?.roomid || '');
+        if (roomId) discovered.add(roomId);
+        if (discovered.size >= 20) break;
+      }
+    } else {
+      await report('live_room_discovery', '', index.result);
+    }
+    const rooms = [...discovered].slice(0, 20);
+    const sourceText = followedCount ? `其中关注房间 ${followedCount} 个` : '未发现关注房间';
+    await report('live_room_discovery', '', rooms.length ? { status: 'success', reason: `自动发现 ${rooms.length} 个直播间（${sourceText}，允许陌生直播间）`, providerCode: 0 } : { status: 'skipped', reason: '关注列表和直播首页都未发现可用直播间', providerCode: 0 });
     return rooms;
   }
 

@@ -13,7 +13,7 @@ export const builtInScheduleDefaults: ScheduleTemplate = {
   account: { cron: '0 8 * * *', enabled: false },
   comment_backfill: { cron: '0 4 * * *', enabled: true },
   daily: { cron: '0 5 * * *', enabled: true },
-  live_automation: { cron: '0 20 * * *', enabled: false },
+  live_automation: { cron: '0 20 * * *', enabled: true },
   streaming: { cron: '0 21 * * *', enabled: false }
 };
 
@@ -87,6 +87,7 @@ export class AccountScheduleService {
   private normalizeStoredDefaults() {
     const defaults = this.getDefaults();
     if (!defaults.clear.enabled && defaults.clear.cron === '0 3 * * 0') defaults.clear.cron = builtInScheduleDefaults.clear.cron;
+    if (defaults.live_automation.cron === builtInScheduleDefaults.live_automation.cron && defaults.live_automation.enabled === false) defaults.live_automation.enabled = true;
     this.db.setSetting('default_account_schedules', JSON.stringify(defaults));
   }
 

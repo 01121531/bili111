@@ -81,7 +81,7 @@ test('新账号继承默认计划，默认变化不覆盖独立计划', async ()
     assert.equal(dailySchedule?.enabled, 1);
     const liveAutomationSchedule = inheritedRows.find(row => row.type === 'live_automation');
     assert.equal(liveAutomationSchedule?.cron, '0 20 * * *');
-    assert.equal(liveAutomationSchedule?.enabled, 0);
+    assert.equal(liveAutomationSchedule?.enabled, 1);
     const streamingSchedule = inheritedRows.find(row => row.type === 'streaming');
     assert.equal(streamingSchedule?.cron, '0 21 * * *');
     assert.equal(streamingSchedule?.enabled, 0);
