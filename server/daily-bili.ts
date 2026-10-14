@@ -210,7 +210,21 @@ export class DailyBiliClient {
     const status = await this.dailyStatus(); if (!status.ok) return { result: status.result };
     if (status.data?.share) return { result: { status: 'completed', reason: '今日分享任务已完成' } };
     const video = await this.video(); if (!video.ok) return { result: video.result };
-    const reply = await this.postForm(`${API}/x/web-interface/share/add`, { aid: video.data!.aid, csrf: this.csrf, eab_x: 1, ramval: Math.floor(Math.random() * 17) + 3, source: 'web_normal', ga: 1 });
+    const reply = await this.postForm(`${API}/x/share/finish`, {
+      ...this.appParams({ oid: video.data!.aid, csrf: this.csrf }),
+      share_channel: 'QQ', share_id: 'main.ugc-video-detail.0.0.pv', share_origin: 'vinfo_share'
+    });
+    if (reply.result.providerCode === -403) {
+      return {
+        targetId: video.data!.bvid,
+        result: {
+          ...reply.result,
+          status: 'skipped',
+          retryable: false,
+          reason: `B站返回 -403（${reply.result.providerMessage || '账号异常'}）；账号级分享风控，已跳过当日分享`
+        }
+      };
+    }
     return { targetId: video.data!.bvid, result: reply.ok ? { status: 'success', reason: `已分享视频 ${video.data!.title}`, providerCode: 0 } : reply.result };
   }
 
@@ -258,38 +272,32 @@ export class DailyBiliClient {
   async liveLottery(): Promise<DailyActionOutcome> {
     const csrfError = this.requireCsrf(); if (csrfError) return { result: csrfError };
     if (this.config.liveLottery.maxPerDay <= 0) return { result: { status: 'skipped', reason: '直播抽奖每日次数上限为 0' } };
-    const nav = await this.nav(); if (!nav.ok) return { result: nav.result };
-    if (!this.mixinKey(nav.data!)) return { result: failure('账号信息缺少 WBI 签名密钥，未扫描或参加直播抽奖', { errorType: 'parse' }) };
-    const areas = await this.get<any>(`${LIVE}/xlive/web-interface/v1/index/getWebAreaList?source_id=2`, 'https://live.bilibili.com');
-    if (!areas.ok) return { result: areas.result };
-    const areaList = Array.isArray(areas.data?.data) ? areas.data.data : [];
+    const index = await this.get<any>(`${LIVE}/xlive/web-interface/v1/index/getList?platform=web`, 'https://live.bilibili.com');
+    if (!index.ok) return { result: index.result };
+    const groups = Array.isArray(index.data?.room_list) ? index.data.room_list : [];
+    const rooms = groups.flatMap((group: any) => Array.isArray(group?.list) ? group.list : []);
+    const candidates: any[] = rooms.filter((room: any) => {
+      const pendants = Object.values(room.pendant_info || room.pendant_Info || {}) as any[];
+      return pendants.some(item => Number(item?.pendent_id ?? item?.pendant_id) === 504);
+    });
+
+    const followed = await this.get<any>(`${LIVE}/xlive/web-ucenter/user/following?page=1&page_size=9`, 'https://live.bilibili.com');
+    if (followed.ok) candidates.push(...(Array.isArray(followed.data?.list) ? followed.data.list.filter((room: any) => Number(room.live_status) === 1) : []));
+
     const details: DailyActionDetail[] = []; const seen = new Set<string>();
-    for (const area of areaList) {
-      for (let page = 1; page <= 5; page += 1) {
-        if (details.filter(item => item.result.status === 'success').length >= this.config.liveLottery.maxPerDay) break;
-        const query = this.signedQuery({ platform: 'web', parent_area_id: Number(area.id), area_id: 0, sort_type: '', page }, nav.data!);
-        const rooms = await this.get<any>(`${LIVE}/xlive/web-interface/v1/second/getList?${query}`, 'https://live.bilibili.com');
-        if (!rooms.ok) return { result: rooms.result, details };
-        const list = Array.isArray(rooms.data?.list) ? rooms.data.list : [];
-        for (const room of list) {
-          const roomId = String(room.roomid || ''); if (!roomId || seen.has(roomId)) continue;
-          const pendants = Object.values(room.pendant_info || {}) as any[];
-          if (!pendants.some(item => Number(item?.pendent_id) === 504)) continue;
-          seen.add(roomId);
-          const check = await this.get<any>(`${LIVE}/xlive/lottery-interface/v1/Anchor/Check?roomid=${encodeURIComponent(roomId)}`, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
-          if (!check.ok) { details.push({ targetId: roomId, result: check.result }); continue; }
-          const lottery = check.data || {}; const award = clean(lottery.award_name, 120);
-          const excluded = this.config.liveLottery.excludeKeywords.some(word => award.includes(word));
-          const included = !this.config.liveLottery.includeKeywords.length || this.config.liveLottery.includeKeywords.some(word => award.includes(word));
-          if (Number(lottery.status) !== 1 || excluded || !included || Number(lottery.send_gift_ensure) !== 0 || ![0, 1].includes(Number(lottery.require_type ?? 0)) || Number(lottery.gift_num || 0) > 0) continue;
-          const join = await this.postForm<any>(`${LIVE}/xlive/lottery-interface/v1/Anchor/Join`, { id: Number(lottery.id), gift_id: Number(lottery.gift_id || 0), gift_num: Number(lottery.gift_num || 0), csrf: this.csrf, csrf_token: this.csrf, visit_id: visitId(), platform: 'pc' }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
-          details.push({ targetId: roomId, result: join.ok ? { status: 'success', reason: `已参加直播间 ${roomId} 的天选抽奖：${award || '未命名奖品'}`, providerCode: 0 } : join.result });
-          if (this.config.requestDelay > 0) await sleep(this.config.requestDelay);
-          if (details.filter(item => item.result.status === 'success').length >= this.config.liveLottery.maxPerDay) break;
-        }
-        if (!Number(rooms.data?.has_more)) break;
-      }
+    for (const room of candidates) {
       if (details.filter(item => item.result.status === 'success').length >= this.config.liveLottery.maxPerDay) break;
+      const roomId = String(room.roomid || ''); if (!roomId || seen.has(roomId)) continue;
+      seen.add(roomId);
+      const check = await this.get<any>(`${LIVE}/xlive/lottery-interface/v1/Anchor/Check?roomid=${encodeURIComponent(roomId)}`, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
+      if (!check.ok) { details.push({ targetId: roomId, result: check.result }); continue; }
+      const lottery = check.data || {}; const award = clean(lottery.award_name, 120);
+      const excluded = this.config.liveLottery.excludeKeywords.some(word => award.includes(word));
+      const included = !this.config.liveLottery.includeKeywords.length || this.config.liveLottery.includeKeywords.some(word => award.includes(word));
+      if (Number(lottery.status) !== 1 || excluded || !included || Number(lottery.send_gift_ensure) !== 0 || ![0, 1].includes(Number(lottery.require_type ?? 0)) || Number(lottery.gift_num || 0) > 0 || Number(lottery.gift_price || 0) > 0) continue;
+      const join = await this.postForm<any>(`${LIVE}/xlive/lottery-interface/v1/Anchor/Join`, { id: Number(lottery.id), gift_id: Number(lottery.gift_id || 0), gift_num: Number(lottery.gift_num || 0), csrf: this.csrf, csrf_token: this.csrf, visit_id: visitId(), platform: 'pc' }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
+      details.push({ targetId: roomId, result: join.ok ? { status: 'success', reason: `已参加直播间 ${roomId} 的天选抽奖：${award || '未命名奖品'}`, providerCode: 0 } : join.result });
+      if (this.config.requestDelay > 0) await sleep(this.config.requestDelay);
     }
     const joined = details.filter(item => item.result.status === 'success').length;
     if (joined) return { result: { status: 'success', reason: `直播天选抽奖已参加 ${joined} 场` }, details };

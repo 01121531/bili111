@@ -218,7 +218,7 @@ export class DailyTaskRunner {
   async run(account: AccountRow, runId: number, config: DailyConfig, options: Record<string, unknown> = {}): Promise<{ code: number; discovered: number; candidates: number; attempted: number; success: number; partial: number; failed: number; errors: number }> {
     const selectedActions = Array.isArray(options.actions) ? options.actions.map(String) : [];
     const taskDate = today(); const preview = this.preview(account, config, selectedActions); let attempted = 0; let success = 0; let failed = 0; let skipped = 0; const started = new Date().toISOString();
-    const record = async (action: string, result: DailyResult, targetId = '', attemptCount = 0) => { const row = this.db.upsertDailyAction(account.id, runId, taskDate, { action, targetId, status: result.status, providerCode: result.providerCode, providerMessage: result.providerMessage, errorType: result.errorType, httpStatus: result.httpStatus, transportCode: result.transportCode, retryable: result.retryable, attemptCount: result.attemptCount || attemptCount, reason: result.reason, startedAt: started, finishedAt: new Date().toISOString() }); for (const [index, attempt] of (result.attempts || []).entries()) this.db.addDailyActionAttempt(account.id, runId, taskDate, action, targetId, index + 1, attempt); return row; };
+    const record = async (action: string, result: DailyResult, targetId = '', attemptCount = 0, includeAttempts = true) => { const row = this.db.upsertDailyAction(account.id, runId, taskDate, { action, targetId, status: result.status, providerCode: result.providerCode, providerMessage: result.providerMessage, errorType: result.errorType, httpStatus: result.httpStatus, transportCode: result.transportCode, retryable: result.retryable, attemptCount: result.attemptCount || attemptCount, reason: result.reason, startedAt: started, finishedAt: new Date().toISOString() }); if (includeAttempts) for (const [index, attempt] of (result.attempts || []).entries()) this.db.addDailyActionAttempt(account.id, runId, taskDate, action, targetId, index + 1, attempt); return row; };
     if (!config.enabled) { await record('daily', { status: 'skipped', reason: '每日任务总开关已关闭' }); return { code: 0, discovered: preview.actions.length, candidates: 0, attempted: 0, success: 0, partial: 0, failed: 0, errors: 0 }; }
     const runAction = async (action: string, enabled: boolean, fn: () => Promise<DailyActionOutcome>) => {
       enabled = enabled && (!selectedActions.length || selectedActions.includes(action));
@@ -227,7 +227,7 @@ export class DailyTaskRunner {
       attempted += 1; const outcome = await fn();
       for (const detail of outcome.details || []) await record(action, detail.result, detail.targetId, detail.result.status === 'failed' ? 1 : 0);
       if (outcome.targetId) await record(action, outcome.result, outcome.targetId, outcome.result.status === 'failed' ? 1 : 0);
-      await record(action, outcome.result, '', outcome.result.status === 'failed' ? 1 : 0);
+      await record(action, outcome.result, '', outcome.result.status === 'failed' ? 1 : 0, !(outcome.targetId || outcome.details?.length));
       if (['success', 'completed'].includes(outcome.result.status)) success += 1; else if (['failed', 'throttled'].includes(outcome.result.status)) failed += 1; else skipped += 1;
     };
     const client = new DailyBiliClient(decrypt(account.cookie), config);

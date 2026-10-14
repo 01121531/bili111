@@ -184,6 +184,79 @@ test('观看视频使用排行榜目标并提交脱敏所需的心跳字段', { 
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('分享视频使用移动端完成接口并将账号级 -403 记录为当日跳过', { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch; const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input); calls.push({ url, init });
+    if (url.includes('/x/web-interface/nav')) return jsonResponse({ code: 0, data: { isLogin: true, mid: 42 } });
+    if (url.includes('/x/member/web/exp/reward')) return jsonResponse({ code: 0, data: { share: false } });
+    if (url.includes('/x/web-interface/ranking/v2')) return jsonResponse({ code: 0, data: { list: [{ aid: 123, bvid: 'BV1share', cid: 456, duration: 20, title: '分享目标' }] } });
+    if (url.includes('/x/share/finish')) return jsonResponse({ code: -403, message: '账号异常,操作失败' });
+    return jsonResponse({ code: -404, message: 'unexpected' }, 404);
+  }) as typeof fetch;
+  try {
+    const client = new DailyBiliClient('DedeUserID=42; bili_jct=csrf-value', mergeDailyConfig({ experience: { share: true }, retryTimes: 0 }));
+    await client.validate();
+    const outcome = await client.shareVideo();
+    assert.equal(outcome.result.status, 'skipped');
+    assert.equal(outcome.result.providerCode, -403);
+    assert.match(outcome.result.reason, /账号级分享风控/);
+    const share = calls.find(call => call.url.includes('/x/share/finish'))!;
+    assert.equal(calls.some(call => call.url.includes('/x/web-interface/share/add')), false);
+    const body = new URLSearchParams(String(share.init?.body));
+    assert.equal(body.get('oid'), '123');
+    assert.equal(body.get('platform'), 'android');
+    assert.equal(body.get('share_origin'), 'vinfo_share');
+    assert.equal(body.get('csrf'), 'csrf-value');
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('直播天选从首页和关注直播间发现候选，不再调用高风控分区列表', { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch; const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input); calls.push({ url, init });
+    if (url.includes('/x/web-interface/nav')) return jsonResponse({ code: 0, data: { isLogin: true, mid: 42 } });
+    if (url.includes('/index/getList')) return jsonResponse({ code: 0, data: { room_list: [{ list: [{ roomid: 1001, pendant_Info: { 2: { pendent_id: 504 } } }] }] } });
+    if (url.includes('/user/following')) return jsonResponse({ code: 0, data: { list: [{ roomid: 1002, live_status: 1 }] } });
+    if (url.includes('/Anchor/Check')) return jsonResponse({ code: 0, data: { id: 9, status: 1, award_name: '测试奖品', send_gift_ensure: 0, require_type: 0, gift_id: 0, gift_num: 0, gift_price: 0 } });
+    if (url.includes('/Anchor/Join')) return jsonResponse({ code: 0, data: {} });
+    return jsonResponse({ code: -404, message: 'unexpected' }, 404);
+  }) as typeof fetch;
+  try {
+    const client = new DailyBiliClient('DedeUserID=42; bili_jct=csrf-value', mergeDailyConfig({ liveLottery: { enabled: true, maxPerDay: 2 }, requestDelay: 0, retryTimes: 0 }));
+    await client.validate();
+    const outcome = await client.liveLottery();
+    assert.equal(outcome.result.status, 'success');
+    assert.deepEqual(outcome.details?.map(item => item.targetId), ['1001', '1002']);
+    assert.equal(calls.some(call => call.url.includes('/second/getList')), false);
+    assert.equal(calls.filter(call => call.url.includes('/Anchor/Join')).length, 2);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('带目标的每日动作只保存一次请求尝试', { concurrency: false }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-attempt-dedupe-'));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/x/web-interface/nav')) return jsonResponse({ code: 0, data: { isLogin: true, mid: 9013 } });
+    if (url.includes('/x/member/web/exp/reward')) return jsonResponse({ code: 0, data: { share: false } });
+    if (url.includes('/x/web-interface/ranking/v2')) return jsonResponse({ code: 0, data: { list: [{ aid: 1, bvid: 'BV1dedupe', cid: 2, duration: 10, title: '尝试记录目标' }] } });
+    if (url.includes('/x/share/finish')) return jsonResponse({ code: -500, message: '测试失败' });
+    return jsonResponse({ code: -404, message: 'unexpected' }, 404);
+  }) as typeof fetch;
+  try {
+    const db = await AppDatabase.create(join(directory, 'test.db'));
+    const account = db.createAccount({ uid: '9013', cookie: encrypt('DedeUserID=9013; bili_jct=test') })!;
+    const config = mergeDailyConfig({ experience: { share: true }, requestDelay: 0, retryTimes: 0 });
+    const result = await new DailyTaskRunner(db).run(account, 42, config, { actions: ['share_video'] });
+    assert.equal(result.code, 1);
+    const attempts = db.listDailyActionAttempts(42) as any[];
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0].target_id, 'BV1dedupe');
+    assert.equal(attempts[0].provider_code, -500);
+  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('投币遵守今日上限、余额保护并记录目标视频', { concurrency: false }, async () => {
   const originalFetch = globalThis.fetch; const calls: Array<{ url: string; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
