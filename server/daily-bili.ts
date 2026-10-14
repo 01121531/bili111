@@ -712,10 +712,11 @@ export class DailyBiliClient {
   async runLiveAutomation(signal: AbortSignal, report: (action: string, targetId: string, result: DailyResult) => void | Promise<void>) {
     const cfg = this.config.liveAutomation; const csrfError = this.requireCsrf(); if (csrfError) throw new Error(csrfError.reason);
     if (!cfg.enabled) return { status: 'completed', reason: '长运行直播任务未启用' } as DailyResult;
-    if (!cfg.rooms.length) return { status: 'skipped', reason: '未配置直播间' } as DailyResult;
+    const rooms = cfg.rooms.length ? cfg.rooms : await this.discoverLiveRooms(report);
+    if (!rooms.length) return { status: 'skipped', reason: '未配置直播间，且当前账号没有发现正在直播的关注 UP 主' } as DailyResult;
     const deadline = Date.now() + cfg.durationMinutes * 60000; let redCount = 0; let danmakuCount = 0; let cycle = 0;
     while (!signal.aborted && Date.now() < deadline) {
-      for (const roomId of cfg.rooms) {
+      for (const roomId of rooms) {
         if (signal.aborted || Date.now() >= deadline) break;
         const info = await this.get<any>(`${LIVE}/room/v1/Room/get_info?room_id=${encodeURIComponent(roomId)}&from=room`, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
         if (!info.ok) { await report('live_room_check', roomId, info.result); continue; }
@@ -753,6 +754,28 @@ export class DailyBiliClient {
       await new Promise<void>(resolve => { const timer = setTimeout(resolve, 60000); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
     }
     return { status: signal.aborted ? 'skipped' : 'success', reason: signal.aborted ? '长运行直播任务已取消' : `长运行直播任务已完成 ${cycle} 轮` } as DailyResult;
+  }
+
+  private async discoverLiveRooms(report: (action: string, targetId: string, result: DailyResult) => void | Promise<void>) {
+    const discovered = new Set<string>();
+    const pageSize = 50;
+    for (let page = 1; page <= 3; page += 1) {
+      const reply = await this.get<any>(`${LIVE}/xlive/web-ucenter/user/following?page=${page}&page_size=${pageSize}`, 'https://live.bilibili.com', 'https://live.bilibili.com/');
+      if (!reply.ok) {
+        await report('live_room_discovery', '', reply.result);
+        return [...discovered];
+      }
+      const list = Array.isArray(reply.data?.list) ? reply.data.list : [];
+      for (const room of list) {
+        const roomId = String(room.roomid || '');
+        if (roomId && Number(room.live_status) === 1) discovered.add(roomId);
+      }
+      const totalPage = Math.max(1, Number(reply.data?.totalPage) || 1);
+      if (page >= totalPage || list.length === 0) break;
+    }
+    const rooms = [...discovered];
+    await report('live_room_discovery', '', rooms.length ? { status: 'success', reason: `自动发现 ${rooms.length} 个正在直播的关注 UP 主房间`, providerCode: 0 } : { status: 'skipped', reason: '未发现正在直播的关注 UP 主房间', providerCode: 0 });
+    return rooms;
   }
 
   async prepareStream(): Promise<{ roomId?: number; pushUrl?: string; result: DailyResult }> {

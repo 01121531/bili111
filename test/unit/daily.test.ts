@@ -233,6 +233,29 @@ test('直播天选从首页和关注直播间发现候选，不再调用高风�
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('长运行直播任务在未配置房间时自动发现正在直播的关注 UP 主', { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch; const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input); calls.push(url);
+    if (url.includes('/xlive/web-ucenter/user/following')) return jsonResponse({ code: 0, data: { list: [{ roomid: 2001, live_status: 1 }, { roomid: 2002, live_status: 0 }], totalPage: 1 } });
+    if (url.includes('/room/v1/Room/get_info')) return jsonResponse({ code: 0, data: { uid: 9001, parent_area_id: 1, area_id: 2 } });
+    if (url.includes('/xlive/data-interface/v1/heartbeat')) return jsonResponse({ code: 0, data: {} });
+    return jsonResponse({ code: 0, data: { isLogin: true, mid: 42 } });
+  }) as typeof fetch;
+  try {
+    const config = structuredClone(defaultDailyConfig);
+    config.liveAutomation = { ...config.liveAutomation, enabled: true, rooms: [], heartbeat: true, durationMinutes: -1 };
+    config.requestDelay = 0; config.retryTimes = 0;
+    const client = new DailyBiliClient('DedeUserID=42; bili_jct=csrf-value', config);
+    const events: Array<{ action: string; target: string; reason: string }> = [];
+    const rooms = await (client as any).discoverLiveRooms((action: string, target: string, item: any) => { events.push({ action, target, reason: item.reason }); });
+    assert.deepEqual(rooms, ['2001']);
+    assert.match(events.find(item => item.action === 'live_room_discovery')?.reason || '', /自动发现 1 个/);
+    assert.equal(calls.some(url => url.includes('following')), true);
+    assert.equal(calls.some(url => url.includes('roomid=2001')), false);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('带目标的每日动作只保存一次请求尝试', { concurrency: false }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-attempt-dedupe-'));
   const originalFetch = globalThis.fetch;
