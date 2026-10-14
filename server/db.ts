@@ -15,6 +15,13 @@ export type ParticipationInput = { dyid: string; overallStatus: string; resultCo
 export type LotteryQuery = { page?: number; pageSize?: number; accountId?: number; source?: string; discoveryStatus?: string; participationStatus?: string; drawTimeSource?: string; filterSource?: string; search?: string; from?: string; to?: string };
 export type ParticipationQuery = { page?: number; pageSize?: number; status?: string; search?: string };
 export type LogQuery = { cursor?: number; limit?: number; level?: string; search?: string; errorsOnly?: boolean };
+export type DailyActionInput = {
+  action: string; targetId?: string | null; status: string; providerCode?: number | null;
+  providerMessage?: string | null; errorType?: string | null; httpStatus?: number | null;
+  transportCode?: string | null; retryable?: boolean; attemptCount?: number; reason?: string | null;
+  startedAt?: string; finishedAt?: string;
+};
+export type DailyAttemptInput = { status: string; reason?: string | null; providerCode?: number | null; providerMessage?: string | null; errorType?: string | null; httpStatus?: number | null; transportCode?: string | null; retryable?: boolean; attemptCount?: number };
 
 export class AppDatabase {
   private constructor(private db: SqlDatabase, private filename: string) {}
@@ -54,6 +61,11 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS account_schedules (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, type TEXT NOT NULL, cron TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, last_run_at TEXT, next_run_at TEXT, last_job_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(account_id,type));
       CREATE TABLE IF NOT EXISTS cleanup_summaries (run_id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL, preview INTEGER NOT NULL DEFAULT 0, threshold_days INTEGER NOT NULL, scanned_count INTEGER NOT NULL DEFAULT 0, relevant_count INTEGER NOT NULL DEFAULT 0, active_count INTEGER NOT NULL DEFAULT 0, expired_count INTEGER NOT NULL DEFAULT 0, protected_up_count INTEGER NOT NULL DEFAULT 0, delete_candidate_count INTEGER NOT NULL DEFAULT 0, delete_success_count INTEGER NOT NULL DEFAULT 0, delete_failed_count INTEGER NOT NULL DEFAULT 0, unfollow_candidate_count INTEGER NOT NULL DEFAULT 0, unfollow_success_count INTEGER NOT NULL DEFAULT 0, unfollow_failed_count INTEGER NOT NULL DEFAULT 0, unfollow_blocked_reason TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS cleanup_records (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, account_id INTEGER NOT NULL, action TEXT NOT NULL, target_id TEXT NOT NULL, related_uid TEXT, dynamic_created_at INTEGER, inferred_expired_at INTEGER, status TEXT NOT NULL, reason TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS daily_action_records (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, run_id INTEGER NOT NULL, task_date TEXT NOT NULL, action TEXT NOT NULL, target_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL, provider_code INTEGER, provider_message TEXT, error_type TEXT, http_status INTEGER, transport_code TEXT, retryable INTEGER NOT NULL DEFAULT 0, attempt_count INTEGER NOT NULL DEFAULT 0, reason TEXT, started_at TEXT NOT NULL, finished_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(account_id,task_date,action,target_id));
+      CREATE TABLE IF NOT EXISTS daily_action_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id INTEGER NOT NULL, run_id INTEGER NOT NULL, task_date TEXT NOT NULL, action TEXT NOT NULL, target_id TEXT NOT NULL DEFAULT '', attempt_no INTEGER NOT NULL, status TEXT NOT NULL, provider_code INTEGER, provider_message TEXT, error_type TEXT, http_status INTEGER, transport_code TEXT, retryable INTEGER NOT NULL DEFAULT 0, reason TEXT, occurred_at TEXT NOT NULL, UNIQUE(run_id,action,target_id,attempt_no));
+      CREATE TABLE IF NOT EXISTS daily_risk_consents (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, account_id INTEGER NOT NULL DEFAULT 0, action TEXT NOT NULL, accepted_at TEXT NOT NULL, UNIQUE(scope,account_id,action));
+      CREATE TABLE IF NOT EXISTS long_task_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, run_id INTEGER, account_id INTEGER NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', cancel_requested INTEGER NOT NULL DEFAULT 0, started_at TEXT, heartbeat_at TEXT, finished_at TEXT, error TEXT, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS daily_media_assets (id INTEGER PRIMARY KEY AUTOINCREMENT, original_name TEXT NOT NULL, stored_name TEXT NOT NULL UNIQUE, mime_type TEXT, size_bytes INTEGER NOT NULL, duration_seconds REAL, probe_status TEXT NOT NULL DEFAULT 'pending', probe_error TEXT, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
     this.addColumn('win_events', 'actor TEXT');
     this.addColumn('win_events', 'occurred_at TEXT');
@@ -103,9 +115,14 @@ export class AppDatabase {
     this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_attempts_participation ON participation_action_attempts(participation_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_participation_attempts_error ON participation_action_attempts(provider_code,error_type,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_cleanup_records_run ON cleanup_records(run_id,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_daily_action_run ON daily_action_records(run_id,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_daily_action_date ON daily_action_records(account_id,task_date,status)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_daily_attempt_run ON daily_action_attempts(run_id,action,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_long_task_account ON long_task_sessions(account_id,status,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_lotteries_cleanup_protection ON lotteries(account_id,source_created_at,participation_status)');
     this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_win_events_event_key ON win_events(event_key) WHERE event_key IS NOT NULL');
     this.recoverHistoricalParticipationErrors();
+    this.db.run("UPDATE long_task_sessions SET status='interrupted',finished_at=COALESCE(finished_at,datetime('now')),error=COALESCE(error,'服务重启导致任务中断') WHERE status IN ('pending','running','cancelling')");
     this.flush(); if (!this.getSetting('admin_password_hash')) this.setSetting('admin_password_hash', hashPassword(process.env.ADMIN_PASSWORD || 'admin'));
   }
   private recoverHistoricalParticipationErrors() {
@@ -557,6 +574,61 @@ export class AppDatabase {
   }
   deleteSchedule(id: number) { this.run('DELETE FROM account_schedules WHERE id=?', [id]); }
   listDueSchedules(now: string) { return this.rows<ScheduleRow>('SELECT * FROM account_schedules WHERE enabled=1 AND next_run_at IS NOT NULL AND next_run_at<=? ORDER BY next_run_at,id', [now]); }
+  getDailyAction(accountId: number, taskDate: string, action: string, targetId = '') {
+    return this.row<any>('SELECT * FROM daily_action_records WHERE account_id=? AND task_date=? AND action=? AND target_id=?', [accountId, taskDate, action, targetId]);
+  }
+  upsertDailyAction(accountId: number, runId: number, taskDate: string, input: DailyActionInput) {
+    const now = this.now();
+    const startedAt = input.startedAt || now; const finishedAt = input.finishedAt || now;
+    this.run(`INSERT INTO daily_action_records(account_id,run_id,task_date,action,target_id,status,provider_code,provider_message,error_type,http_status,transport_code,retryable,attempt_count,reason,started_at,finished_at,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(account_id,task_date,action,target_id) DO UPDATE SET run_id=excluded.run_id,status=excluded.status,provider_code=excluded.provider_code,provider_message=excluded.provider_message,error_type=excluded.error_type,http_status=excluded.http_status,transport_code=excluded.transport_code,retryable=excluded.retryable,attempt_count=excluded.attempt_count,reason=excluded.reason,started_at=excluded.started_at,finished_at=excluded.finished_at`,
+      [accountId, runId, taskDate, input.action, input.targetId || '', input.status, input.providerCode ?? null, input.providerMessage || null, input.errorType || null, input.httpStatus ?? null, input.transportCode || null, input.retryable ? 1 : 0, Number(input.attemptCount) || 0, input.reason || null, startedAt, finishedAt, now]);
+    return this.getDailyAction(accountId, taskDate, input.action, input.targetId || '');
+  }
+  addDailyActionAttempt(accountId: number, runId: number, taskDate: string, action: string, targetId: string, attemptNo: number, input: DailyAttemptInput) {
+    const occurredAt = this.now();
+    this.run(`INSERT OR IGNORE INTO daily_action_attempts(account_id,run_id,task_date,action,target_id,attempt_no,status,provider_code,provider_message,error_type,http_status,transport_code,retryable,reason,occurred_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, [accountId, runId, taskDate, action, targetId || '', attemptNo, input.status, input.providerCode ?? null, input.providerMessage || null, input.errorType || null, input.httpStatus ?? null, input.transportCode || null, input.retryable ? 1 : 0, input.reason || null, occurredAt]);
+    return this.row<any>('SELECT * FROM daily_action_attempts WHERE run_id=? AND action=? AND target_id=? AND attempt_no=?', [runId, action, targetId || '', attemptNo]);
+  }
+  listDailyActions(runId: number) { return this.rows('SELECT * FROM daily_action_records WHERE run_id=? ORDER BY id', [runId]); }
+  listDailyActionAttempts(runId: number) { return this.rows('SELECT * FROM daily_action_attempts WHERE run_id=? ORDER BY action,target_id,attempt_no,id', [runId]); }
+  listDailyActionsForDate(accountId: number, taskDate: string) { return this.rows('SELECT * FROM daily_action_records WHERE account_id=? AND task_date=? ORDER BY id', [accountId, taskDate]); }
+  dailyStats(accountId?: number, taskDate = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date())) {
+    const where = accountId ? "WHERE account_id=? AND task_date=? AND target_id=''" : "WHERE task_date=? AND target_id=''"; const params = accountId ? [accountId, taskDate] : [taskDate];
+    const count = (status?: string) => Number(this.row<any>(`SELECT COUNT(*) count FROM daily_action_records ${where}${status ? `${where ? ' AND' : ' WHERE'} status=?` : ''}`, status ? [...params, status] : params)?.count || 0);
+    return { total: count(), success: count('success'), completed: count('completed'), skipped: count('skipped'), failed: count('failed'), throttled: count('throttled') };
+  }
+  resetAllDailyConfigs() {
+    const accounts = this.listAccounts();
+    this.db.run('BEGIN');
+    try {
+      for (const account of accounts) {
+        const current = this.getConfig(account.id) as Record<string, unknown>;
+        delete current.daily_tasks;
+        this.db.run('INSERT INTO account_configs(account_id,config_json,updated_at) VALUES (?,?,?) ON CONFLICT(account_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at', [account.id, JSON.stringify(current), this.now()]);
+      }
+      this.db.run('COMMIT'); this.flush(); return accounts.length;
+    } catch (error) { this.db.run('ROLLBACK'); throw error; }
+  }
+  hasDailyRiskConsent(scope: 'default' | 'account', accountId: number, action: string) { return Boolean(this.row('SELECT id FROM daily_risk_consents WHERE scope=? AND account_id=? AND action=?', [scope, accountId, action])); }
+  saveDailyRiskConsent(scope: 'default' | 'account', accountId: number, action: string) { this.run('INSERT INTO daily_risk_consents(scope,account_id,action,accepted_at) VALUES (?,?,?,?) ON CONFLICT(scope,account_id,action) DO UPDATE SET accepted_at=excluded.accepted_at', [scope, accountId, action, this.now()]); }
+  listDailyRiskConsents(scope: 'default' | 'account', accountId: number) { return this.rows<any>('SELECT action,accepted_at FROM daily_risk_consents WHERE scope=? AND account_id=? ORDER BY action', [scope, accountId]); }
+  createLongTaskSession(jobId: number, accountId: number, type: string, details: Record<string, unknown> = {}) { const id = this.insert('INSERT INTO long_task_sessions(job_id,account_id,type,status,details_json,created_at) VALUES (?,?,?,?,?,?)', [jobId, accountId, type, 'pending', JSON.stringify(details), this.now()]); return this.getLongTaskSession(id); }
+  getLongTaskSession(id: number) { const row = this.row<any>('SELECT s.*,a.name account_name,a.note account_note FROM long_task_sessions s JOIN accounts a ON a.id=s.account_id WHERE s.id=?', [id]); if (row) { try { row.details = JSON.parse(row.details_json || '{}'); } catch { row.details = {}; } } return row; }
+  getLongTaskSessionByJob(jobId: number) { const row = this.row<any>('SELECT id FROM long_task_sessions WHERE job_id=? ORDER BY id DESC LIMIT 1', [jobId]); return row ? this.getLongTaskSession(Number(row.id)) : undefined; }
+  listLongTaskSessions(accountId?: number, limit = 100) { const ids = this.rows<any>(`SELECT id FROM long_task_sessions ${accountId ? 'WHERE account_id=?' : ''} ORDER BY id DESC LIMIT ?`, accountId ? [accountId, limit] : [limit]); return ids.map(item => this.getLongTaskSession(Number(item.id))); }
+  updateLongTaskSession(id: number, status: string, patch: { runId?: number | null; error?: string | null; details?: Record<string, unknown>; cancelRequested?: boolean; startedAt?: string | null; finishedAt?: string | null; heartbeatAt?: string | null } = {}) {
+    const current = this.getLongTaskSession(id); if (!current) return undefined;
+    this.run('UPDATE long_task_sessions SET run_id=?,status=?,cancel_requested=?,started_at=?,heartbeat_at=?,finished_at=?,error=?,details_json=? WHERE id=?', [patch.runId === undefined ? current.run_id : patch.runId, status, patch.cancelRequested === undefined ? current.cancel_requested : patch.cancelRequested ? 1 : 0, patch.startedAt === undefined ? current.started_at : patch.startedAt, patch.heartbeatAt === undefined ? current.heartbeat_at : patch.heartbeatAt, patch.finishedAt === undefined ? current.finished_at : patch.finishedAt, patch.error === undefined ? current.error : patch.error, JSON.stringify(patch.details === undefined ? current.details : patch.details), id]);
+    return this.getLongTaskSession(id);
+  }
+  requestLongTaskCancel(id: number) { const current = this.getLongTaskSession(id); if (!current) return undefined; return this.updateLongTaskSession(id, current.status === 'pending' ? 'cancelled' : 'cancelling', { cancelRequested: true, finishedAt: current.status === 'pending' ? this.now() : current.finished_at }); }
+  createMediaAsset(input: { originalName: string; storedName: string; mimeType?: string; sizeBytes: number; durationSeconds?: number | null; probeStatus?: string; probeError?: string | null }) { const id = this.insert('INSERT INTO daily_media_assets(original_name,stored_name,mime_type,size_bytes,duration_seconds,probe_status,probe_error,created_at) VALUES (?,?,?,?,?,?,?,?)', [input.originalName, input.storedName, input.mimeType || null, input.sizeBytes, input.durationSeconds ?? null, input.probeStatus || 'pending', input.probeError || null, this.now()]); return this.getMediaAsset(id); }
+  getMediaAsset(id: number) { return this.row<any>('SELECT * FROM daily_media_assets WHERE id=?', [id]); }
+  listMediaAssets() { return this.rows<any>('SELECT * FROM daily_media_assets ORDER BY id DESC'); }
+  deleteMediaAsset(id: number) { this.run('DELETE FROM daily_media_assets WHERE id=?', [id]); }
   markScheduleTriggered(id: number, jobId: number | null, nextRunAt: string) { this.run('UPDATE account_schedules SET last_run_at=?,last_job_id=?,next_run_at=?,updated_at=? WHERE id=?', [this.now(), jobId, nextRunAt, this.now(), id]); }
   stats() { const today = new Date().toISOString().slice(0, 10); const count = (sql: string, params: any[] = []) => Number(this.row<any>(sql, params)?.count || 0); return { accounts: count('SELECT COUNT(*) count FROM accounts'), activeAccounts: count("SELECT COUNT(*) count FROM accounts WHERE enabled=1 AND cookie_status='valid'"), lotteriesToday: count('SELECT COUNT(*) count FROM lotteries WHERE created_at LIKE ?', [`${today}%`]), winsUnread: count('SELECT COUNT(*) count FROM win_events WHERE is_read=0'), runsToday: count('SELECT COUNT(*) count FROM runs WHERE started_at LIKE ?', [`${today}%`]), successToday: count("SELECT COUNT(*) count FROM runs WHERE started_at LIKE ? AND status='success'", [`${today}%`]) }; }
 }

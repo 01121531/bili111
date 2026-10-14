@@ -2,7 +2,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { AppDatabase, ScheduleSeed } from './db';
 import { SerialScheduler } from './scheduler';
 
-export const scheduleJobTypes = ['start', 'check', 'clear', 'account', 'comment_backfill'] as const;
+export const scheduleJobTypes = ['start', 'check', 'clear', 'account', 'comment_backfill', 'daily', 'live_automation', 'streaming'] as const;
 export type ScheduleJobType = typeof scheduleJobTypes[number];
 export type ScheduleTemplate = Record<ScheduleJobType, { cron: string; enabled: boolean }>;
 
@@ -11,7 +11,10 @@ export const builtInScheduleDefaults: ScheduleTemplate = {
   check: { cron: '*/30 * * * *', enabled: false },
   clear: { cron: '0 3 * * *', enabled: false },
   account: { cron: '0 8 * * *', enabled: false },
-  comment_backfill: { cron: '0 4 * * *', enabled: true }
+  comment_backfill: { cron: '0 4 * * *', enabled: true },
+  daily: { cron: '0 5 * * *', enabled: true },
+  live_automation: { cron: '0 20 * * *', enabled: false },
+  streaming: { cron: '0 21 * * *', enabled: false }
 };
 
 export function nextScheduleRun(cron: string, from = new Date()) {

@@ -2,8 +2,10 @@ import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { existsSync } from 'node:fs';
+import multipart from '@fastify/multipart';
+import { createWriteStream, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { randomBytes } from 'node:crypto';
 import { AppDatabase } from './db';
 import { decrypt, encrypt, verifyPassword } from './security';
@@ -16,6 +18,8 @@ import { AccountScheduleService, nextScheduleRun, scheduleJobTypes } from './acc
 import { EmailNotificationService } from './notifications';
 import { AccountVerifier } from './account-verifier';
 import { LotteryEnricher } from './lottery-enricher';
+import { dailyActionLabels, dailyCatalog, dailyConfigDiff, defaultDailyConfig, mergeDailyConfig, riskyDailyActions, type DailyConfig } from './daily';
+import { ffmpegStatus, mediaDirectory, probeMedia, removeMediaFile, safeMediaName } from './live-tasks';
 
 async function bootstrap() {
 const app = Fastify({ logger: false });
@@ -49,6 +53,7 @@ const qrSessions = new Map<string, { key: string; expires: number }>();
 
 await app.register(cookie);
 await app.register(cors, { origin: true, credentials: true });
+await app.register(multipart, { limits: { files: 1, fileSize: 2 * 1024 * 1024 * 1024, fields: 5 } });
 app.addContentTypeParser(['application/gzip', 'application/octet-stream'], { parseAs: 'buffer' }, (_request, body, done) => done(null, body));
 
 async function auth(request: any, reply: any) { if (!sessions.has(request.cookies.admin_session)) return reply.code(401).send({ error: '未登录' }); }
@@ -106,7 +111,13 @@ app.post('/api/accounts/verify-all', { preHandler: auth }, async (request, reply
 app.post('/api/accounts/qr/start', { preHandler: auth }, async () => { const qr = await createQrSession(); const id = randomBytes(10).toString('hex'); qrSessions.set(id, { key: qr.key, expires: Date.now() + 180000 }); return { sessionId: id, image: qr.image, expiresAt: Date.now() + 180000 }; });
 app.post('/api/accounts/qr/:sessionId/poll', { preHandler: auth }, async (request, reply) => { const session = qrSessions.get((request.params as any).sessionId); if (!session || session.expires < Date.now()) return reply.code(410).send({ status: 'expired' }); const result = await pollQrSession(session.key); if (result.status === 'success' && result.rawCookie) { const verified = await verifyBiliCookie(result.rawCookie); if (!verified.ok) return reply.code(verified.kind === 'invalid' ? 400 : 502).send(verified); const row = db.createAccount({ cookie: encrypt(result.rawCookie), uid: verified.profile.uid, name: verified.profile.name, profile: verified.profile }); accountSchedules.ensureAccount(row!.id); qrSessions.delete((request.params as any).sessionId); return { ...result, rawCookie: undefined, account: publicAccount(row) }; } return { ...result, rawCookie: undefined }; });
 
-app.post('/api/accounts/:id/jobs', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const type = (request.body as any)?.type || 'start'; if (!['start', 'discover', 'check', 'clear', 'account', 'comment_backfill'].includes(type)) return reply.code(400).send({ error: '不支持的任务类型' }); return scheduler.enqueue(id, type); });
+app.post('/api/accounts/:id/jobs', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  const body = (request.body || {}) as Record<string, any>; const type = body.type || 'start';
+  if (!['start', 'discover', 'check', 'clear', 'account', 'comment_backfill', 'daily', 'live_automation', 'streaming'].includes(type)) return reply.code(400).send({ error: '不支持的任务类型' });
+  try { return scheduler.enqueue(id, type, { ...(body.options || {}), ...(Array.isArray(body.actions) ? { actions: body.actions.map(String) } : {}) }); }
+  catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); }
+});
 app.get('/api/cleanup/config', { preHandler: auth }, async () => cleanupPayload('default'));
 app.put('/api/cleanup/config', { preHandler: auth }, async (request, reply) => {
   try {
@@ -177,6 +188,63 @@ app.post('/api/accounts/:id/comment-backfill/preview', { preHandler: auth }, asy
 app.post('/api/accounts/:id/comment-backfill', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const limit = Math.min(100, Math.max(1, Number((request.body as any)?.limit) || 20)); const candidates = db.listCommentBackfillCandidates(id, limit); if (!candidates.length) return { accepted: false, reason: '没有待补充评论的参与记录', pending: 0 }; return { accepted: true, limit, job: scheduler.enqueue(id, 'comment_backfill', { limit }) }; });
 app.post('/api/jobs/:id/cancel', { preHandler: auth }, async (request) => ({ ok: scheduler.cancel(parseId((request.params as any).id)) }));
 app.get('/api/jobs', { preHandler: auth }, async () => db.listJobs());
+function readDailyGlobal() { try { return JSON.parse(db.getSetting('global_config') || '{}').daily_tasks || {}; } catch { return {}; } }
+function dailyRiskFlags(config: DailyConfig): Record<string, boolean> {
+  return {
+    coin_video: config.experience.coin, live_lottery: config.liveLottery.enabled, silver_to_coin: config.silver2Coin.enabled, charge: config.charge.enabled,
+    big_point_exchange: config.resourceTasks.bigPointExchange, manga_point_exchange: config.resourceTasks.mangaPointExchange, expiring_gift: config.resourceTasks.giftDelivery,
+    activity_lottery: config.community.activityLottery, match_guess: config.community.matchGuess, jury_vote: config.community.jury,
+    live_reservation: config.community.reservation, blacklist_cleanup: config.community.blacklistCleanup,
+    live_automation: config.liveAutomation.enabled, streaming: config.streaming.enabled
+  };
+}
+function missingDailyRiskConsents(scope: 'default' | 'account', accountId: number, current: DailyConfig, next: DailyConfig, confirmed: string[]) {
+  const before = dailyRiskFlags(current); const after = dailyRiskFlags(next);
+  return Object.keys(after).filter(action => after[action] && !before[action] && !db.hasDailyRiskConsent(scope, accountId, action) && !confirmed.includes(action));
+}
+function saveDailyRiskConsents(scope: 'default' | 'account', accountId: number, actions: string[]) { for (const action of actions) if ([...riskyDailyActions, 'live_automation', 'streaming'].includes(action as any)) db.saveDailyRiskConsent(scope, accountId, action); }
+app.get('/api/daily/catalog', { preHandler: auth }, async () => ({ source: { name: 'BiliOutils', url: 'https://github.com/catlair/BiliOutils', license: 'MIT', integration: 'protocol-reference' }, groups: dailyCatalog.map(group => ({ ...group, actions: group.actions.map(action => ({ id: action, label: dailyActionLabels[action], risky: (riskyDailyActions as readonly string[]).includes(action) })) })), longActions: [{ id: 'live_automation', label: dailyActionLabels.live_automation, risky: true }, { id: 'streaming', label: dailyActionLabels.streaming, risky: true }] }));
+app.get('/api/daily/config', { preHandler: auth }, async () => ({ scope: 'default', effective: mergeDailyConfig(readDailyGlobal()), defaults: defaultDailyConfig, inherited: false, riskConsents: db.listDailyRiskConsents('default', 0) }));
+app.put('/api/daily/config', { preHandler: auth }, async (request, reply) => {
+  try {
+    const body = (request.body || {}) as Record<string, any>; const current = mergeDailyConfig(readDailyGlobal());
+    const global = (() => { try { return JSON.parse(db.getSetting('global_config') || '{}') as Record<string, any>; } catch { return {}; } })();
+    const { normalized, diff } = dailyConfigDiff(body.daily_tasks || body || {}, {}); const confirmed = Array.isArray(body.riskConfirmations) ? body.riskConfirmations.map(String) : [];
+    const missing = missingDailyRiskConsents('default', 0, current, normalized, confirmed); if (missing.length) return reply.code(409).send({ error: '启用这些动作前需要确认风险', requiresConfirmation: missing.map(action => ({ action, label: dailyActionLabels[action] || action })) });
+    saveDailyRiskConsents('default', 0, confirmed);
+    if (Object.keys(diff).length) global.daily_tasks = diff; else delete global.daily_tasks;
+    db.setSetting('global_config', JSON.stringify(global));
+    return { scope: 'default', effective: normalized, defaults: defaultDailyConfig, inherited: false, riskConsents: db.listDailyRiskConsents('default', 0) };
+  } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : '每日任务配置无效' }); }
+});
+app.post('/api/daily/config/apply-to-all', { preHandler: auth }, async () => ({ ok: true, accounts: db.resetAllDailyConfigs() }));
+app.get('/api/daily/status', { preHandler: auth }, async () => ({ accounts: db.listAccounts().map(account => ({ accountId: account.id, accountName: account.name || `账号 ${account.id}`, ...db.dailyStats(account.id) })) }));
+app.get('/api/accounts/:id/daily/config', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); const account = db.getAccount(id); if (!account) return reply.code(404).send({ error: '账号不存在' });
+  const override = (db.getConfig(id) as any).daily_tasks || {}; const inherited = readDailyGlobal(); return { scope: 'account', accountId: id, effective: mergeDailyConfig(override, inherited), overrides: override, defaults: mergeDailyConfig({}, inherited), inherited: Object.keys(override).length === 0, riskConsents: db.listDailyRiskConsents('account', id) };
+});
+app.put('/api/accounts/:id/daily/config', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  try { const body = (request.body || {}) as Record<string, any>; const config = db.getConfig(id) as any; const inherited = readDailyGlobal(); const current = mergeDailyConfig(config.daily_tasks, inherited); const { normalized, diff } = dailyConfigDiff(body.daily_tasks || body || {}, inherited); const confirmed = Array.isArray(body.riskConfirmations) ? body.riskConfirmations.map(String) : []; const missing = missingDailyRiskConsents('account', id, current, normalized, confirmed); if (missing.length) return reply.code(409).send({ error: '启用这些动作前需要确认风险', requiresConfirmation: missing.map(action => ({ action, label: dailyActionLabels[action] || action })) }); saveDailyRiskConsents('account', id, confirmed); if (Object.keys(diff).length) config.daily_tasks = diff; else delete config.daily_tasks; db.setConfig(id, config); return { scope: 'account', accountId: id, effective: normalized, overrides: diff, defaults: mergeDailyConfig({}, inherited), inherited: Object.keys(diff).length === 0, riskConsents: db.listDailyRiskConsents('account', id) }; }
+  catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : '每日任务配置无效' }); }
+});
+app.post('/api/accounts/:id/daily/config/reset', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const config = db.getConfig(id) as any; delete config.daily_tasks; db.setConfig(id, config); return { ok: true, accountId: id, effective: mergeDailyConfig({}, readDailyGlobal()), inherited: true }; });
+app.post('/api/accounts/:id/daily/preview', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); const account = db.getAccount(id); if (!account) return reply.code(404).send({ error: '账号不存在' }); const config = db.getConfig(id) as any; const actions = Array.isArray((request.body as any)?.actions) ? (request.body as any).actions.map(String) : []; return scheduler.daily.previewRemote(account, mergeDailyConfig(config.daily_tasks, readDailyGlobal()), actions); });
+app.get('/api/runs/:id/daily', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getRun(id)) return reply.code(404).send({ error: '运行记录不存在' }); const items = db.listDailyActions(id); const attempts = db.listDailyActionAttempts(id); const summaries = items.filter((item: any) => !item.target_id); const count = (status?: string) => summaries.filter((item: any) => !status || item.status === status).length; return { runId: id, items, attempts, summary: { total: summaries.length, success: count('success'), completed: count('completed'), skipped: count('skipped'), failed: count('failed'), throttled: count('throttled') } }; });
+app.post('/api/accounts/:id/live-sessions', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); const type = String((request.body as any)?.type || 'live_automation'); if (!['live_automation', 'streaming'].includes(type)) return reply.code(400).send({ error: '不支持的长任务类型' }); try { return scheduler.enqueue(id, type, (request.body as any)?.options || {}); } catch (error) { return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) }); } });
+app.get('/api/accounts/:id/live-sessions', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return db.listLongTaskSessions(id); });
+app.delete('/api/live-sessions/:id', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); return scheduler.longTasks.cancel(id) ? { ok: true } : reply.code(404).send({ error: '长任务不存在' }); });
+app.get('/api/daily/media', { preHandler: auth }, async () => ({ ffmpeg: await ffmpegStatus(), items: db.listMediaAssets() }));
+app.post('/api/daily/media', { preHandler: auth }, async (request, reply) => {
+  const part = await (request as any).file(); if (!part) return reply.code(400).send({ error: '请选择媒体文件' });
+  let storedName = ''; let path = '';
+  try {
+    storedName = safeMediaName(part.filename); path = join(mediaDirectory, storedName); await pipeline(part.file, createWriteStream(path)); const size = statSync(path).size;
+    if (size > 2 * 1024 * 1024 * 1024) throw new Error('素材不能超过 2GB');
+    const probe = await probeMedia(path); return db.createMediaAsset({ originalName: String(part.filename).slice(0, 255), storedName, mimeType: String(part.mimetype || '').slice(0, 120), sizeBytes: size, durationSeconds: probe.duration, probeStatus: probe.ok ? 'ready' : 'failed', probeError: probe.ok ? null : probe.error });
+  } catch (error) { if (storedName) removeMediaFile(storedName); return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
+});
+app.delete('/api/daily/media/:id', { preHandler: auth }, async (request, reply) => { const id = parseId((request.params as any).id); const asset = db.getMediaAsset(id); if (!asset) return reply.code(404).send({ error: '素材不存在' }); const referenced = [mergeDailyConfig(readDailyGlobal()), ...db.listAccounts().map(account => mergeDailyConfig((db.getConfig(account.id) as any).daily_tasks, readDailyGlobal()))].some(config => config.streaming.mediaId === id); if (referenced) return reply.code(409).send({ error: '该素材仍被默认配置或账号配置使用' }); removeMediaFile(asset.stored_name); db.deleteMediaAsset(id); return { ok: true }; });
 app.get('/api/schedules', { preHandler: auth }, async () => db.listSchedules());
 app.get('/api/schedules/defaults', { preHandler: auth }, async () => accountSchedules.listDefaults());
 app.put('/api/schedules/defaults', { preHandler: auth }, async (request, reply) => {
@@ -348,7 +416,7 @@ const dist = join(process.cwd(), 'web', 'dist');
 if (existsSync(dist)) { await app.register(fastifyStatic, { root: dist }); app.setNotFoundHandler((request, reply) => request.raw.url?.startsWith('/api/') ? reply.code(404).send({ error: '接口不存在' }) : reply.sendFile('index.html')); }
 
 const port = Number(process.env.PORT || 6666);
-app.addHook('onClose', async () => { accountSchedules.stop(); enricher.stop(); });
+app.addHook('onClose', async () => { accountSchedules.stop(); enricher.stop(); await scheduler.longTasks.shutdown(); });
 await app.listen({ port, host: process.env.HOST || '0.0.0.0' });
 console.log(`Lottery web console listening on http://localhost:${port}`);
 void verifier.verifyAll('unknown').catch(error => console.error('自动验证账号失败', error instanceof Error ? error.message : String(error)));

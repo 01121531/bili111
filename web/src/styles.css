@@ -448,6 +448,37 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
 .json-editor[readonly] { color: var(--text-muted); }
 
 .form-grid { padding: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.daily-form { padding: 18px; display: grid; gap: 16px; }
+.daily-options { padding: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 18px; }
+.daily-options .switch-row { min-height: 48px; padding: 9px 11px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.daily-options .switch-row span { min-width: 0; display: grid; gap: 3px; }
+.daily-options .switch-row small, .daily-preview small { display: block; color: var(--text-muted); font-size: .78rem; font-weight: 400; line-height: 1.45; }
+.daily-options .switch-row.is-disabled { opacity: .72; }
+.compact-form { padding: 0; }
+.daily-account-check { margin: 18px 18px 0; padding: 11px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid var(--border); border-radius: 6px; }
+.daily-preview { padding: 18px; display: grid; gap: 8px; }
+.daily-preview > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.daily-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); scrollbar-width: thin; }
+.daily-tabs button { min-width: max-content; min-height: 40px; padding: 0 14px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); font-weight: 700; }
+.daily-tabs button:hover { background: var(--surface-hover); color: var(--text); }
+.daily-tabs button.active { background: var(--primary-soft); color: var(--primary); }
+.daily-save-row { width: fit-content; max-width: 100%; margin-left: auto; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }
+.daily-source-note { margin: 8px 0 0; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+.daily-source-note a { color: var(--primary); text-decoration: none; }
+.daily-source-note a:hover { text-decoration: underline; }
+.stream-status { margin: 18px 18px 0; min-height: 48px; padding: 10px 12px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.media-list, .session-list { display: grid; }
+.media-list > div:not(.empty-state), .session-list > div:not(.empty-state) { min-height: 70px; padding: 12px 18px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 12px; border-bottom: 1px solid var(--border); }
+.media-list > div:not(.empty-state):last-child, .session-list > div:not(.empty-state):last-child { border-bottom: 0; }
+.media-list > div > svg { color: var(--primary); }
+.media-list span, .session-list span { min-width: 0; display: grid; gap: 3px; }
+.media-list strong, .session-list strong { overflow-wrap: anywhere; }
+.media-list small, .session-list small { color: var(--text-muted); overflow-wrap: anywhere; }
+.session-list > div { grid-template-columns: minmax(180px, 1fr) auto minmax(180px, 1fr) auto; }
+.upload-button { cursor: pointer; }
+.upload-button input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.status-throttled, .status-cancelling { color: var(--warning); background: var(--warning-soft); }
+.status-interrupted { color: var(--danger); background: var(--danger-soft); }
 .prompt-grid { padding: 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .prompt-grid label:nth-last-child(-n+2) { grid-column: span 1; }
 .toggle-list { padding: 18px; }
@@ -490,8 +521,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
 .loading-screen { min-height: 100dvh; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--text-muted); }
 
 @media (max-width: 1180px) {
-  .sidebar { transform: translateX(-102%); transition: transform .22s ease; box-shadow: 18px 0 48px rgba(0,0,0,.22); }
-  .sidebar.open { transform: translateX(0); }
+  .sidebar { transform: translateX(-102%); transition: transform .22s ease; box-shadow: none; }
+  .sidebar.open { transform: translateX(0); box-shadow: 18px 0 48px rgba(0,0,0,.22); }
   .workspace { margin-left: 0; }
   .menu-button, .nav-close { display: inline-flex; }
   .nav-scrim { position: fixed; inset: 0; z-index: 35; display: block; pointer-events: none; opacity: 0; background: rgba(4, 18, 20, .52); transition: opacity .2s ease; }
@@ -590,6 +621,16 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
   .config-field { grid-template-columns: 1fr; gap: 10px; padding: 15px; }
   .repeat-row, .inline-fields { grid-template-columns: 1fr; }
   .form-grid, .prompt-grid { grid-template-columns: 1fr; padding: 15px; }
+  .daily-options { grid-template-columns: 1fr; padding: 15px; }
+  .daily-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-inline: -2px; overflow: visible; }
+  .daily-tabs button { min-width: 0; padding-inline: 8px; }
+  .daily-save-row { width: 100%; }
+  .daily-save-row .button { flex: 1 1 150px; }
+  .media-list > div:not(.empty-state), .session-list > div:not(.empty-state) { grid-template-columns: 32px minmax(0, 1fr); padding: 13px 15px; }
+  .media-list .status-pill, .media-list .icon-button, .session-list .status-pill, .session-list > div > small, .session-list .button { grid-column: 2; justify-self: start; }
+  .session-list > div > span { grid-column: 1 / -1; }
+  .stream-status { grid-template-columns: auto 1fr; }
+  .stream-status .status-pill { grid-column: 2; justify-self: start; }
   .toggle-list.horizontal { grid-template-columns: 1fr; }
   .version-grid { grid-template-columns: 1fr 1fr; }
   .update-line { grid-template-columns: 1fr; gap: 2px; }
@@ -607,6 +648,8 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
 }
 
 @media (max-width: 430px) {
+  .panel-header { align-items: stretch; flex-direction: column; }
+  .panel-header > .button, .panel-header > .upload-button { width: 100%; justify-content: center; }
   .metric-grid { grid-template-columns: 1fr; }
   .metric-card { min-height: 96px; align-items: center; }
   .filter-grid { grid-template-columns: 1fr; }

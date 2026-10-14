@@ -330,3 +330,4 @@ buvid3亦可不填 使用随机生成值
 - [LotteryAutoScript_Station](https://github.com/spiritLHLS/LotteryAutoScript_Station) - [@spiritLHL](https://github.com/spiritLHLS)
 - [sync_lottery](https://github.com/spiritLHLS/sync_lottery) - [@spiritLHL](https://github.com/spiritLHLS)
 - [BDSF](https://github.com/spiritLHLS/BDSF) - [@spiritLHL](https://github.com/spiritLHLS)
+- [BiliOutils](https://github.com/catlair/BiliOutils)（MIT）- “B站任务中心”的部分公开协议参考；本项目独立实现，不引入其运行时或框架代码。

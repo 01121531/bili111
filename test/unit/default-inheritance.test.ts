@@ -58,7 +58,7 @@ test('恢复默认和应用到全部账号只清除业务覆盖并保留 AI', as
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
 
-test('新账号继承五项默认计划，默认变化不覆盖独立计划', async () => {
+test('新账号继承默认计划，默认变化不覆盖独立计划', async () => {
   const item = await databaseFixture();
   let service: AccountScheduleService | undefined;
   try {
@@ -69,13 +69,22 @@ test('新账号继承五项默认计划，默认变化不覆盖独立计划', as
 
     const independentRows = service.listAccount(independent.id);
     const inheritedRows = service.listAccount(inherited.id);
-    assert.equal(independentRows.length, 5);
-    assert.equal(inheritedRows.length, 5);
+    assert.equal(independentRows.length, 8);
+    assert.equal(inheritedRows.length, 8);
     assert.equal(independentRows.find(row => row.type === 'start')?.is_override, 1);
     assert.equal(inheritedRows.every(row => row.is_override === 0), true);
     const commentSchedule = inheritedRows.find(row => row.type === 'comment_backfill');
     assert.equal(commentSchedule?.cron, '0 4 * * *');
     assert.equal(commentSchedule?.enabled, 1);
+    const dailySchedule = inheritedRows.find(row => row.type === 'daily');
+    assert.equal(dailySchedule?.cron, '0 5 * * *');
+    assert.equal(dailySchedule?.enabled, 1);
+    const liveAutomationSchedule = inheritedRows.find(row => row.type === 'live_automation');
+    assert.equal(liveAutomationSchedule?.cron, '0 20 * * *');
+    assert.equal(liveAutomationSchedule?.enabled, 0);
+    const streamingSchedule = inheritedRows.find(row => row.type === 'streaming');
+    assert.equal(streamingSchedule?.cron, '0 21 * * *');
+    assert.equal(streamingSchedule?.enabled, 0);
 
     service.saveDefaults({ start: { cron: '0 10 * * *', enabled: true } });
     assert.equal(service.listAccount(independent.id).find(row => row.type === 'start')?.cron, '0 7 * * *');

@@ -9,7 +9,7 @@ export class ApiError extends Error {
 
 export async function api<T = AnyObject>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers || {});
-  if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+  if (init.body && !headers.has('content-type') && !(init.body instanceof FormData) && !(init.body instanceof Blob)) headers.set('content-type', 'application/json');
   const response = await fetch(path, { credentials: 'include', ...init, headers });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -19,9 +19,9 @@ export async function api<T = AnyObject>(path: string, init: RequestInit = {}): 
   return data as T;
 }
 
-export const taskText: AnyObject = { start: '执行抽奖', discover: '仅发现抽奖', check: '中奖检测', clear: '开奖清理', clear_preview: '清理预览', account: '验证账号', comment_backfill: '补充历史评论' };
+export const taskText: AnyObject = { start: '执行抽奖', discover: '仅发现抽奖', check: '中奖检测', clear: '开奖清理', clear_preview: '清理预览', account: '验证账号', comment_backfill: '补充历史评论', daily: 'B站有限任务', live_automation: '长运行直播任务', streaming: '自动开播' };
 export const statusText: AnyObject = {
-  valid: '正常', invalid: '失效', unknown: '待验证', pending: '排队中', running: '运行中', success: '已完成', failed: '失败', skipped: '已跳过', cancelled: '已取消',
+  valid: '正常', invalid: '失效', unknown: '待验证', pending: '排队中', running: '运行中', success: '已完成', failed: '失败', skipped: '已跳过', cancelled: '已取消', cancelling: '正在停止', interrupted: '已中断', completed: '此前已完成', throttled: '风控暂停',
   candidate: '候选', filtered: '未通过筛选', participated: '已参与', partial: '部分完成', not_attempted: '未尝试', not_required: '未要求', already_participated: '此前已参与', already_done: '此前已完成', challenge: '需要验证'
 };
 export const levelText: AnyObject = { info: '信息', warn: '警告', warning: '警告', error: '错误', debug: '调试' };
