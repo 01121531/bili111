@@ -211,6 +211,29 @@ test('分享视频使用移动端完成接口并将账号级 -403 记录为当�
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('每日任务将已下线、非会员和余额不足动作记录为跳过，并修正漫画分享平台参数', { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch; const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input); calls.push(url);
+    if (url.includes('/xlive/web-ucenter/v1/sign/WebGetSignInfo')) return jsonResponse({ code: 0, data: { is_signed: 0 } });
+    if (url.includes('/xlive/web-ucenter/v1/sign/DoSign')) return jsonResponse({ code: 1, message: '签到活动已下线，无法使用。' });
+    if (url.includes('/x/vip/experience/add')) return jsonResponse({ code: 235007, message: '当前非有效大会员!' });
+    if (url.includes('/xlive/revenue/v1/wallet/getStatus')) return jsonResponse({ code: 0, data: { silver_2_coin_left: 1 } });
+    if (url.includes('/xlive/revenue/v1/wallet/silver2coin')) return jsonResponse({ code: 403, message: '银瓜子余额不足' });
+    if (url.includes('/twirp/activity.v1.Activity/ShareComic')) return jsonResponse({ code: 0, data: {} });
+    return jsonResponse({ code: 0, data: { isLogin: true, mid: 42, level_info: { current_level: 6 } } });
+  }) as typeof fetch;
+  try {
+    const client = new DailyBiliClient('DedeUserID=42; bili_jct=csrf-value', mergeDailyConfig({ requestDelay: 0, retryTimes: 0, experience: { devicePlatform: 'android' } }));
+    await client.validate();
+    assert.equal((await client.liveSign()).result.status, 'skipped');
+    assert.equal((await client.vipExperience()).result.status, 'skipped');
+    assert.equal((await client.silverToCoin()).result.status, 'skipped');
+    assert.equal((await client.mangaShare()).result.status, 'success');
+    assert.equal(calls.some(url => url.includes('ShareComic?platform=android')), true);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('直播天选从首页和关注直播间发现候选，不再调用高风控分区列表', { concurrency: false }, async () => {
   const originalFetch = globalThis.fetch; const calls: Array<{ url: string; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {

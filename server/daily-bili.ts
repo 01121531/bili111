@@ -451,10 +451,15 @@ export class DailyBiliClient {
     const details: DailyActionDetail[] = [];
     for (let index = 0; index < count; index += 1) {
       const reply = await this.postForm<any>(`${LIVE}/xlive/revenue/v1/wallet/silver2coin`, { csrf: this.csrf, csrf_token: this.csrf, visit_id: visitId() }, 'https://link.bilibili.com');
-      details.push({ targetId: String(index + 1), result: reply.ok ? { status: 'success', reason: `第 ${index + 1} 次兑换成功`, providerCode: 0 } : reply.result });
+      const result = !reply.ok && (reply.result.providerCode === 403 || /银瓜子余额不足|余额不足/.test(reply.result.providerMessage || reply.result.reason || ''))
+        ? { status: 'skipped' as const, reason: `银瓜子余额不足，跳过第 ${index + 1} 次兑换` }
+        : reply.ok ? { status: 'success' as const, reason: `第 ${index + 1} 次兑换成功`, providerCode: 0 } : reply.result;
+      details.push({ targetId: String(index + 1), result });
       if (!reply.ok) break;
     }
     const successes = details.filter(item => item.result.status === 'success').length;
+    const failures = details.filter(item => ['failed', 'throttled'].includes(item.result.status));
+    if (!failures.length && !successes) return { result: { status: 'skipped', reason: '银瓜子余额不足，未执行兑换' }, details };
     return { result: successes === count ? { status: 'success', reason: `银瓜子兑换成功 ${successes} 次` } : failure(`银瓜子兑换未完成：计划 ${count} 次，成功 ${successes} 次`), details };
   }
 
@@ -499,6 +504,9 @@ export class DailyBiliClient {
     if (!info.ok) return { result: info.result };
     if (Number(info.data?.is_signed) === 1 || Number(info.data?.status) === 1) return { result: { status: 'completed', reason: '直播签到今日已完成' } };
     const reply = await this.get<any>(`${LIVE}/xlive/web-ucenter/v1/sign/DoSign`, 'https://live.bilibili.com');
+    if (!reply.ok && (reply.result.providerCode === 1 || /活动已下线|无法使用/.test(reply.result.providerMessage || reply.result.reason || ''))) {
+      return { result: { status: 'skipped', reason: `直播签到不可用：${reply.result.providerMessage || reply.result.reason || '活动已下线'}` } };
+    }
     return { result: reply.ok ? { status: 'success', reason: '直播签到成功', providerCode: 0, attempts: reply.result.attempts } : reply.result };
   }
 
@@ -521,11 +529,14 @@ export class DailyBiliClient {
   async vipExperience(): Promise<DailyActionOutcome> {
     const csrfError = this.requireCsrf(); if (csrfError) return { result: csrfError };
     const reply = await this.postForm<any>(`${API}/x/vip/experience/add?${this.appSignedParams({ csrf: this.csrf })}`, {});
+    if (!reply.ok && (reply.result.providerCode === 235007 || /非有效大会员|不是有效大会员/.test(reply.result.providerMessage || reply.result.reason || ''))) {
+      return { result: { status: 'skipped', reason: `当前账号不是有效大会员：${reply.result.providerMessage || reply.result.reason || '无需领取 VIP 经验'}` } };
+    }
     return { result: reply.ok ? { status: 'success', reason: 'VIP 每日经验领取成功', providerCode: 0, attempts: reply.result.attempts } : reply.result };
   }
 
   async mangaShare(): Promise<DailyActionOutcome> {
-    const reply = await this.postJson<any>(`${MANGA}/twirp/activity.v1.Activity/ShareComic`, { is_teenager: 0, no_recommend: 0, mobi_app: 'android_comic', platform: 'android', channel: 'bilicomic', ts: Date.now() }, 'https://manga.bilibili.com');
+    const reply = await this.postJson<any>(`${MANGA}/twirp/activity.v1.Activity/ShareComic?platform=android`, { is_teenager: 0, no_recommend: 0, mobi_app: 'android_comic', platform: 'android', channel: 'bilicomic', ts: Date.now() }, 'https://manga.bilibili.com');
     return { result: reply.ok ? { status: 'success', reason: '漫画分享任务完成', providerCode: 0, attempts: reply.result.attempts } : reply.result };
   }
 
@@ -644,6 +655,9 @@ export class DailyBiliClient {
   async juryVote(): Promise<DailyActionOutcome> {
     const csrfError = this.requireCsrf(); if (csrfError) return { result: csrfError };
     const status = await this.get<any>(`${API}/x/credit/v2/jury/jury`, 'https://www.bilibili.com', 'https://www.bilibili.com/judgement/index');
+    if (!status.ok && (status.result.providerCode === 25006 || /资格已过期|不是风纪委员/.test(status.result.providerMessage || status.result.reason || ''))) {
+      return { result: { status: 'skipped', reason: `风纪委员资格不可用：${status.result.providerMessage || status.result.reason || '无需执行社区众议院'}` } };
+    }
     if (!status.ok) return { result: status.result };
     if (!status.data?.status && this.config.community.juryAutoApply) {
       const apply = await this.postForm<any>(`${API}/x/credit/v2/jury/apply`, { csrf: this.csrf });
