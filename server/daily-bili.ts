@@ -729,11 +729,11 @@ export class DailyBiliClient {
     const rooms = cfg.rooms.length ? cfg.rooms : await this.discoverLiveRooms(report);
     if (!rooms.length) return { status: 'skipped', reason: '未配置直播间，且当前账号没有发现正在直播的关注 UP 主' } as DailyResult;
     const deadline = Date.now() + cfg.durationMinutes * 60000; let redCount = 0; let danmakuCount = 0; let cycle = 0;
-    while (!signal.aborted && Date.now() < deadline) {
+    liveLoop: while (!signal.aborted && Date.now() < deadline) {
       for (const roomId of rooms) {
         if (signal.aborted || Date.now() >= deadline) break;
         const info = await this.get<any>(`${LIVE}/room/v1/Room/get_info?room_id=${encodeURIComponent(roomId)}&from=room`, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
-        if (!info.ok) { await report('live_room_check', roomId, info.result); continue; }
+        if (!info.ok) { await report('live_room_check', roomId, info.result); if (info.result.status === 'throttled') break liveLoop; continue; }
         const upId = String(info.data?.uid || '');
         if (cfg.intimacy && cycle === 0) {
           const like = await this.postForm<any>(`${LIVE}/xlive/web-ucenter/v1/interact/likeInteract`, { roomid: roomId, csrf: this.csrf, csrf_token: this.csrf }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
@@ -759,7 +759,7 @@ export class DailyBiliClient {
           }
         }
         if (cfg.heartbeat && upId) {
-          const now = Math.floor(Date.now() / 1000); const base: Record<string, any> = { platform: 'android', uuid: randomBytes(16).toString('hex'), buvid: `XX${randomBytes(16).toString('hex').toUpperCase()}`, seq_id: String(cycle + 1), room_id: roomId, parent_id: String(info.data?.parent_area_id || 0), area_id: String(info.data?.area_id || 0), timestamp: String(now - 60), secret_key: 'axoaadsffcazxksectbbb', watch_time: '60', up_id: upId, up_level: '40', jump_from: '30000', gu_id: randomBytes(22).toString('hex').toUpperCase(), play_type: '0', play_url: '', s_time: '0', data_behavior_id: '', data_source_id: '', up_session: '', visit_id: randomBytes(16).toString('hex'), watch_status: '', click_id: '', session_id: '-99998', player_type: '0', client_ts: String(now) };
+          const now = Math.floor(Date.now() / 1000); const base: Record<string, any> = { platform: 'android', uuid: randomBytes(16).toString('hex'), buvid: `XX${randomBytes(16).toString('hex').toUpperCase()}`, seq_id: cycle + 1, room_id: roomId, parent_id: Number(info.data?.parent_area_id || 0), area_id: Number(info.data?.area_id || 0), timestamp: now - 60, secret_key: 'axoaadsffcazxksectbbb', watch_time: 60, up_id: Number(upId) || 0, up_level: 40, jump_from: 30000, gu_id: randomBytes(22).toString('hex').toUpperCase(), play_type: 0, play_url: '', s_time: 0, data_behavior_id: '', data_source_id: '', up_session: '', visit_id: randomBytes(16).toString('hex'), watch_status: '', click_id: '', session_id: -99998, player_type: 0, client_ts: now };
           const heartbeat = await this.postJson<any>(`https://live-trace.bilibili.com/xlive/data-interface/v1/heartbeat/mobileHeartBeat`, { ...base, ts: now, client_sign: this.liveHeartbeatSign(base), mobi_app: 'android', channel: 'xiaomi_cn_tv.danmaku.bili_20210930', c_locale: 'zh_CN', device: 'android', build: 6790300, csrf_token: this.csrf, csrf: this.csrf, disable_rcmd: '0' }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
           await report('live_heartbeat', roomId, heartbeat.ok ? { status: 'success', reason: `第 ${cycle + 1} 次直播心跳成功`, providerCode: 0, attempts: heartbeat.result.attempts } : heartbeat.result);
         }
@@ -767,7 +767,9 @@ export class DailyBiliClient {
       cycle += 1; if (signal.aborted || Date.now() >= deadline) break;
       await new Promise<void>(resolve => { const timer = setTimeout(resolve, 60000); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
     }
-    return { status: signal.aborted ? 'skipped' : 'success', reason: signal.aborted ? '长运行直播任务已取消' : `长运行直播任务已完成 ${cycle} 轮` } as DailyResult;
+    if (signal.aborted) return { status: 'skipped', reason: '长运行直播任务已取消' } as DailyResult;
+    if (this.riskPauseReason) return { status: 'throttled', reason: `长运行直播任务已暂停：${this.riskPauseReason}` } as DailyResult;
+    return { status: 'success', reason: `长运行直播任务已完成 ${cycle} 轮` } as DailyResult;
   }
 
   private async discoverLiveRooms(report: (action: string, targetId: string, result: DailyResult) => void | Promise<void>) {
