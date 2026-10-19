@@ -372,6 +372,26 @@ test('HTTP 限流和重复签到保存真实状态且不暴露 Cookie', { concur
   } finally { globalThis.fetch = originalFetch; }
 });
 
+test('社区众议院提交时资格过期按跳过处理且停止后续投票', { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch; const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input); calls.push(url);
+    if (url.includes('/x/credit/v2/jury/jury')) return jsonResponse({ code: 0, data: { status: 1 } });
+    if (url.includes('/case/next')) return jsonResponse({ code: 0, data: { case_id: 'case-1' } });
+    if (url.includes('/case/opinion')) return jsonResponse({ code: 0, data: { list: [{ vote: 1, likes: 3 }] } });
+    if (url.includes('/jury/vote')) return jsonResponse({ code: 25006, message: '风纪委员资格已过期' });
+    return jsonResponse({ code: -404, message: 'unexpected' }, 404);
+  }) as typeof fetch;
+  try {
+    const client = new DailyBiliClient('DedeUserID=42; bili_jct=csrf-value', mergeDailyConfig({ community: { jury: true, juryMaxCases: 3 }, retryTimes: 0, requestDelay: 0 }));
+    const outcome = await client.juryVote();
+    assert.equal(outcome.result.status, 'completed');
+    assert.equal(outcome.details?.[0].result.status, 'skipped');
+    assert.equal(outcome.details?.[0].result.providerCode, 25006);
+    assert.equal(calls.filter(url => url.includes('/jury/vote')).length, 1);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
 test('VIP 大积分只执行签到和已确认的安全任务', { concurrency: false }, async () => {
   const originalFetch = globalThis.fetch; const calls: Array<{ url: string; init?: RequestInit }> = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {

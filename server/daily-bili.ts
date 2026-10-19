@@ -675,6 +675,10 @@ export class DailyBiliClient {
       const vote = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
       if (!vote) { details.push({ targetId: caseId, result: { status: 'skipped', reason: '案件没有可用于安全决策的公开观点，未自动投票' } }); continue; }
       const reply = await this.postForm<any>(`${API}/x/credit/v2/jury/vote`, { case_id: caseId, vote, csrf: this.csrf, insiders: 0, anonymous: 1 }, 'https://www.bilibili.com', `https://www.bilibili.com/judgement/case-detail/${caseId}`);
+      if (!reply.ok && (reply.result.providerCode === 25006 || /资格已过期|不是风纪委员/.test(reply.result.providerMessage || reply.result.reason || ''))) {
+        details.push({ targetId: caseId, result: { ...reply.result, status: 'skipped', retryable: false, reason: `风纪委员资格不可用：${reply.result.providerMessage || reply.result.reason || '无需执行社区众议院'}` } });
+        break;
+      }
       details.push({ targetId: caseId, result: reply.ok ? { status: 'success', reason: `案件 ${caseId} 已按多数公开观点投票`, providerCode: 0, attempts: reply.result.attempts } : reply.result });
     }
     return this.outcome('社区众议院', details);
