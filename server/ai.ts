@@ -157,7 +157,7 @@ export class AiService {
     if (typeof input.apiKey === 'string' && input.apiKey.trim()) next.apiKey = input.apiKey.trim();
     if (input.clearApiKey === true) delete next.apiKey;
     this.writeStored(next);
-    return publicConfig(next);
+    return publicConfig(this.readStored());
   }
 
   private accountOverride(accountId: number) {

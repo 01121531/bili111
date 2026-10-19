@@ -23,6 +23,22 @@ test('AI 根地址会规范化为 Chat Completions 最终端点', () => {
   assert.throws(() => resolveChatCompletionsUrl('http://example.com/v1'), /HTTPS/);
 });
 
+test('AI 地址和 Key 保存后重新打开数据库仍保持新值', async () => {
+  const item = await databaseFixture();
+  try {
+    const service = new AiService(item.db);
+    const saved = service.saveGlobal({ provider: 'custom', baseUrl: 'https://new-ai.example/v1', model: 'new-model', apiKey: 'new-secret-key' });
+    assert.equal(saved.baseUrl, 'https://new-ai.example/v1/chat/completions');
+    assert.equal(saved.apiKeyConfigured, true); assert.match(saved.apiKeyHint, /-key$/);
+    assert.equal('apiKey' in saved, false);
+
+    const reopened = await AppDatabase.create(join(item.directory, 'test.db'));
+    const persisted = new AiService(reopened);
+    assert.equal(persisted.getGlobalPublic().baseUrl, 'https://new-ai.example/v1/chat/completions');
+    assert.equal(persisted.resolve(1).apiKey, 'new-secret-key');
+  } finally { rmSync(item.directory, { recursive: true, force: true }); }
+});
+
 test('AI 网络错误会展示可定位原因且不会泄露 Key', async () => {
   const item = await databaseFixture(); const originalFetch = globalThis.fetch;
   try {

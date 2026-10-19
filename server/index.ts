@@ -357,7 +357,9 @@ app.post('/api/accounts/:id/config/reset', { preHandler: auth }, async (request,
 });
 app.get('/api/config/export', { preHandler: auth }, async () => ({ accounts: db.listAccounts().map(publicAccount), exportedAt: new Date().toISOString() }));
 app.get('/api/ai/providers', { preHandler: auth }, async () => ai.listProviders());
-app.get('/api/ai/config', { preHandler: auth }, async () => ai.getGlobalPublic());
+app.get('/api/ai/config', { preHandler: auth }, async (_request, reply) => {
+  reply.header('Cache-Control', 'no-store'); return ai.getGlobalPublic();
+});
 app.put('/api/ai/config', { preHandler: auth }, async (request, reply) => {
   try { return ai.saveGlobal((request.body || {}) as Record<string, unknown>); } catch (error) { return reply.code(400).send({ error: String(error) }); }
 });
@@ -365,7 +367,8 @@ app.post('/api/ai/test', { preHandler: auth }, async (request, reply) => {
   try { return await ai.test((request.body || {}) as Record<string, unknown>); } catch (error) { return reply.code(502).send({ error: error instanceof Error ? error.message : 'AI 请求失败' }); }
 });
 app.get('/api/accounts/:id/ai-config', { preHandler: auth }, async (request, reply) => {
-  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' }); return ai.getResolvedPublic(id);
+  const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
+  reply.header('Cache-Control', 'no-store'); return ai.getResolvedPublic(id);
 });
 app.put('/api/accounts/:id/ai-config', { preHandler: auth }, async (request, reply) => {
   const id = parseId((request.params as any).id); if (!db.getAccount(id)) return reply.code(404).send({ error: '账号不存在' });
