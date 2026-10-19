@@ -20,7 +20,8 @@ test('AI 根地址会规范化为 Chat Completions 最终端点', () => {
   assert.equal(resolveChatCompletionsUrl('https://tierflow.cn/v1'), 'https://tierflow.cn/v1/chat/completions');
   assert.equal(resolveChatCompletionsUrl('https://dashscope.aliyuncs.com/compatible-mode/v1/'), 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
   assert.equal(resolveChatCompletionsUrl('https://api.openai.com/v1/chat/completions'), 'https://api.openai.com/v1/chat/completions');
-  assert.throws(() => resolveChatCompletionsUrl('http://example.com/v1'), /HTTPS/);
+  assert.equal(resolveChatCompletionsUrl('http://127.0.0.1:8000/v1'), 'http://127.0.0.1:8000/v1/chat/completions');
+  assert.throws(() => resolveChatCompletionsUrl('file:///tmp/ai'), /HTTP 或 HTTPS/);
 });
 
 test('AI 地址和 Key 保存后重新打开数据库仍保持新值', async () => {

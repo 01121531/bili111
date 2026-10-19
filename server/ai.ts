@@ -52,7 +52,7 @@ function string(value: unknown, fallback: string, max = 4000) { return typeof va
 export function resolveChatCompletionsUrl(value: string) {
   let url: URL;
   try { url = new URL(String(value || '').trim()); } catch { throw new Error('AI Base URL 格式无效'); }
-  if (url.protocol !== 'https:') throw new Error('AI Base URL 必须使用 HTTPS');
+  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('AI Base URL 必须使用 HTTP 或 HTTPS');
   url.hash = '';
   const path = url.pathname.replace(/\/+$/, '');
   if (/\/(?:compatible-mode\/)?v1$/i.test(path)) url.pathname = `${path}/chat/completions`;
