@@ -298,6 +298,10 @@ test('直播心跳使用 B 站要求的数字房间字段', { concurrency: false
     assert.equal(typeof heartbeatBody.seq_id, 'number');
     assert.equal(typeof heartbeatBody.up_id, 'number');
     assert.equal(typeof heartbeatBody.jump_from, 'string');
+    assert.equal(typeof heartbeatBody.play_type, 'string');
+    assert.equal(typeof heartbeatBody.s_time, 'string');
+    assert.equal(typeof heartbeatBody.session_id, 'string');
+    assert.equal(typeof heartbeatBody.player_type, 'string');
   } finally { globalThis.fetch = originalFetch; }
 });
 
