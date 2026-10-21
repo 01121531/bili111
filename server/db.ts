@@ -264,6 +264,9 @@ export class AppDatabase {
     const now = this.now();
     this.run("UPDATE jobs SET status='failed',finished_at=?,error=COALESCE(error,'服务重启，任务已中断') WHERE status IN ('pending','running')", [now]);
     this.run("UPDATE runs SET status='failed',finished_at=?,error=COALESCE(error,'服务重启，运行已中断') WHERE status='running'", [now]);
+    // 清理重启前遗留的长任务会话：这些会话在内存中没有对应控制器，
+    // 若不标记结束，会导致“同账号长任务占用”一直为真，阻塞该账号的抽奖/检测任务。
+    this.run("UPDATE long_task_sessions SET status='interrupted',finished_at=?,error=COALESCE(error,'服务重启，长任务已中断') WHERE status IN ('pending','running','cancelling')", [now]);
   }
   createRun(jobId: number, accountId: number) { return this.insert('INSERT INTO runs(job_id,account_id,status,started_at) VALUES (?,?,?,?)', [jobId, accountId, 'running', this.now()]); }
   finishRun(id: number, status: string, stats: Record<string, number | string> = {}) { this.run('UPDATE runs SET status=?,discovered_count=?,candidate_count=?,attempted_count=?,success_count=?,participated_count=?,partial_count=?,failed_count=?,error_count=?,finished_at=?,error=? WHERE id=?', [status, stats.discovered_count || 0, stats.candidate_count || 0, stats.attempted_count || 0, stats.success_count || 0, stats.participated_count || stats.success_count || 0, stats.partial_count || 0, stats.failed_count || 0, stats.error_count || 0, this.now(), stats.error || null, id]); }

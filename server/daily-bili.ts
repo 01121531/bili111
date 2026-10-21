@@ -80,9 +80,20 @@ export class DailyBiliClient {
     for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
+      // 硬性超时看门狗：B 站接口可能返回响应头后长时间不返回响应体，
+      // 此时 fetch 的 AbortController 可能无法让 response.text() 退出，
+      // 导致整轮直播任务卡死。这里用 Promise.race 对整个“请求+读取响应体”兜底。
+      const guard = new Promise<{ stalled: true }>((resolve) => setTimeout(() => resolve({ stalled: true }), 22000));
       try {
-        const response = await fetch(url, { ...init, signal: controller.signal });
-        const text = await response.text();
+        const response = await Promise.race([
+          fetch(url, { ...init, signal: controller.signal }),
+          guard.then(() => null)
+        ]);
+        if (!response) throw new Error('请求超时');
+        const text = await Promise.race([
+          response.text(),
+          guard.then(() => { throw new Error('响应体读取超时'); })
+        ]);
         let body: any = null;
         try { body = text ? JSON.parse(text) : {}; } catch {
           last = failure(`响应格式异常（HTTP ${response.status}）`, { errorType: 'parse', httpStatus: response.status, retryable: response.status >= 500 });
@@ -732,10 +743,12 @@ export class DailyBiliClient {
     if (!cfg.enabled) return { status: 'completed', reason: '长运行直播任务未启用' } as DailyResult;
     const rooms = cfg.rooms.length ? cfg.rooms : await this.discoverLiveRooms(report);
     if (!rooms.length) return { status: 'skipped', reason: '未配置直播间，且当前账号没有发现正在直播的关注 UP 主' } as DailyResult;
-    const deadline = Date.now() + cfg.durationMinutes * 60000; let redCount = 0; let danmakuCount = 0; let cycle = 0;
+    const deadline = Date.now() + cfg.durationMinutes * 60000;
+    // 硬性截止：即使某个请求长时间卡住也未触发软截止，也绝不允许任务无限制运行。
+    const hardStop = deadline + 2 * 60000; let redCount = 0; let danmakuCount = 0; let cycle = 0;
     liveLoop: while (!signal.aborted && Date.now() < deadline) {
       for (const roomId of rooms) {
-        if (signal.aborted || Date.now() >= deadline) break;
+        if (signal.aborted || Date.now() >= deadline || Date.now() >= hardStop) break;
         const info = await this.get<any>(`${LIVE}/room/v1/Room/get_info?room_id=${encodeURIComponent(roomId)}&from=room`, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
         if (!info.ok) { await report('live_room_check', roomId, info.result); if (info.result.status === 'throttled') break liveLoop; continue; }
         const upId = String(info.data?.uid || '');
@@ -768,8 +781,11 @@ export class DailyBiliClient {
           await report('live_heartbeat', roomId, heartbeat.ok ? { status: 'success', reason: `第 ${cycle + 1} 次直播心跳成功`, providerCode: 0, attempts: heartbeat.result.attempts } : heartbeat.result);
         }
       }
-      cycle += 1; if (signal.aborted || Date.now() >= deadline) break;
+      cycle += 1; if (signal.aborted || Date.now() >= deadline || Date.now() >= hardStop) break;
       await new Promise<void>(resolve => { const timer = setTimeout(resolve, 60000); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
+    }
+    if (Date.now() >= hardStop && !signal.aborted) {
+      return { status: 'failed', reason: '长运行直播任务超过硬性时间上限，已强制结束以免阻塞账号队列' } as DailyResult;
     }
     if (signal.aborted) return { status: 'skipped', reason: '长运行直播任务已取消' } as DailyResult;
     if (this.riskPauseReason) return { status: 'throttled', reason: `长运行直播任务已暂停：${this.riskPauseReason}` } as DailyResult;
