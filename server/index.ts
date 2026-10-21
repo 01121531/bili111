@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { randomBytes } from 'node:crypto';
 import { AppDatabase } from './db';
-import { decrypt, encrypt, verifyPassword } from './security';
+import { decrypt, encrypt, hashPassword, verifyPassword } from './security';
 import { createQrSession, listRelationTags, pollQrSession, verifyBiliCookie } from './bili';
 import { SerialScheduler } from './scheduler';
 import { diffFromBase, diffFromDefaults, publicConfigPayload } from './config';
@@ -88,6 +88,15 @@ app.post('/api/auth/login', async (request, reply) => {
 });
 app.post('/api/auth/logout', { preHandler: auth }, async (request, reply) => { sessions.delete(request.cookies.admin_session); reply.clearCookie('admin_session', { path: '/' }); return { ok: true }; });
 app.get('/api/auth/me', { preHandler: auth }, async () => ({ ok: true }));
+app.post('/api/auth/change-password', { preHandler: auth }, async (request, reply) => {
+  const body = request.body as { currentPassword?: string; newPassword?: string; confirmPassword?: string };
+  if (!body?.currentPassword || !body?.newPassword || !body?.confirmPassword) return reply.code(400).send({ error: '请填写当前密码、新密码和确认密码' });
+  if (!verifyPassword(body.currentPassword, db.getSetting('admin_password_hash')!)) return reply.code(400).send({ error: '当前密码不正确' });
+  if (body.newPassword.length < 6) return reply.code(400).send({ error: '新密码至少需要 6 个字符' });
+  if (body.newPassword !== body.confirmPassword) return reply.code(400).send({ error: '两次输入的新密码不一致' });
+  db.setSetting('admin_password_hash', hashPassword(body.newPassword));
+  return { ok: true };
+});
 
 app.get('/api/accounts', { preHandler: auth }, async () => db.listAccounts().map(publicAccount));
 app.post('/api/accounts/cookie', { preHandler: auth }, async (request, reply) => {
