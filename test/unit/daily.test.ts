@@ -52,8 +52,9 @@ test('BiliOutils 扩展动作默认关闭并限制资源与长任务上限', () 
 
 test('每日动作尝试和首次风险确认按账号持久化', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-audit-'));
+  let db: AppDatabase | undefined;
   try {
-    const db = await AppDatabase.create(join(directory, 'test.db'));
+    db = await AppDatabase.create(join(directory, 'test.db'));
     const account = db.createAccount({ uid: '9010', cookie: 'cookie' })!;
     db.saveDailyRiskConsent('account', account.id, 'match_guess');
     db.saveDailyRiskConsent('account', account.id, 'match_guess');
@@ -70,13 +71,14 @@ test('每日动作尝试和首次风险确认按账号持久化', async () => {
     assert.equal(attempts.length, 1);
     assert.equal(attempts[0].provider_code, -412);
     assert.equal(attempts[0].provider_message, '请求被拦截');
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { await db?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('等待同账号普通任务的长任务可在启动前取消并结束作业', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-long-cancel-'));
+  let db: AppDatabase | undefined;
   try {
-    const db = await AppDatabase.create(join(directory, 'test.db'));
+    db = await AppDatabase.create(join(directory, 'test.db'));
     const account = db.createAccount({ uid: '9011', cookie: encrypt('DedeUserID=9011; bili_jct=test') })!;
     const manager = new LongTaskManager(db, () => undefined, () => true, () => undefined);
     const queued = manager.enqueue(account.id, 'live_automation');
@@ -85,26 +87,28 @@ test('等待同账号普通任务的长任务可在启动前取消并结束作�
     assert.equal(db.getLongTaskSession(Number(queued.session.id))?.status, 'cancelled');
     assert.equal(db.getJob(Number(queued.job.id))?.status, 'cancelled');
     await manager.shutdown();
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { await db?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('每日任务预览只读取本地状态，不生成写操作记录', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-'));
+  let db: AppDatabase | undefined;
   try {
-    const db = await AppDatabase.create(join(directory, 'test.db'));
+    db = await AppDatabase.create(join(directory, 'test.db'));
     const account = db.createAccount({ uid: '9001', cookie: 'DedeUserID=9001; bili_jct=test' })!;
     const runner = new DailyTaskRunner(db);
     const preview = runner.preview(account, defaultDailyConfig);
     assert.equal(preview.taskDate.length, 10);
     assert.equal(preview.actions.some(item => item.action === 'coin_video' && item.enabled === false), true);
     assert.equal(db.listDailyActionsForDate(account.id, preview.taskDate).length, 0);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { await db?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('每日动作记录按账号、日期、动作幂等更新', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-record-'));
+  let db: AppDatabase | undefined;
   try {
-    const db = await AppDatabase.create(join(directory, 'test.db'));
+    db = await AppDatabase.create(join(directory, 'test.db'));
     const account = db.createAccount({ uid: '9002', cookie: 'cookie' })!;
     const first = db.upsertDailyAction(account.id, 1, '2026-10-14', { action: 'coin_video', status: 'failed', reason: '第一次失败', attemptCount: 1 });
     const second = db.upsertDailyAction(account.id, 2, '2026-10-14', { action: 'coin_video', status: 'success', reason: '已完成', attemptCount: 2 });
@@ -113,30 +117,32 @@ test('每日动作记录按账号、日期、动作幂等更新', async () => {
     assert.equal(db.listDailyActionsForDate(account.id, '2026-10-14').length, 1);
     db.upsertDailyAction(account.id, 3, '2026-10-13', { action: 'share_video', status: 'success', reason: '昨日完成' });
     assert.deepEqual(db.dailyStats(account.id, '2026-10-14'), { total: 1, success: 1, completed: 0, skipped: 0, failed: 0, throttled: 0 });
-  } finally { rmSync(directory, { recursive: true, force: true }); }
+  } finally { await db?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('默认关闭的动作只验证账号，不发送 B 站写请求', { concurrency: false }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-empty-run-'));
   const originalFetch = globalThis.fetch; const calls: Array<{ url: string; method: string }> = [];
+  let db: AppDatabase | undefined;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(input), method: String(init?.method || 'GET') });
     return jsonResponse({ code: 0, data: { isLogin: true, mid: 9003, level_info: { current_level: 6 } } });
   }) as typeof fetch;
   try {
-    const db = await AppDatabase.create(join(directory, 'test.db'));
+    db = await AppDatabase.create(join(directory, 'test.db'));
     const account = db.createAccount({ uid: '9003', cookie: encrypt('DedeUserID=9003; bili_jct=test') })!;
     const result = await new DailyTaskRunner(db).run(account, 1, defaultDailyConfig);
     assert.equal(result.code, 0);
     assert.equal(calls.length, 1);
     assert.equal(calls.some(call => call.method === 'POST'), false);
     assert.equal(db.listDailyActions(1).some((item: any) => item.action === 'watch_video' && item.status === 'skipped'), true);
-  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await db?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('限定动作执行不会触发同组其他写操作', { concurrency: false }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-selected-'));
   const originalFetch = globalThis.fetch; const calls: string[] = [];
+  let db: AppDatabase | undefined;
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = String(input); calls.push(url);
     if (url.includes('/x/web-interface/nav')) return jsonResponse({ code: 0, data: { isLogin: true, mid: 9012, level_info: { current_level: 6 } } });
@@ -146,7 +152,7 @@ test('限定动作执行不会触发同组其他写操作', { concurrency: false
     return jsonResponse({ code: -404, message: 'unexpected' }, 404);
   }) as typeof fetch;
   try {
-    const db = await AppDatabase.create(join(directory, 'test.db'));
+    db = await AppDatabase.create(join(directory, 'test.db'));
     const account = db.createAccount({ uid: '9012', cookie: encrypt('DedeUserID=9012; bili_jct=test') })!;
     const config = mergeDailyConfig({ experience: { watch: true, share: true }, requestDelay: 0, retryTimes: 0 });
     const result = await new DailyTaskRunner(db).run(account, 41, config, { actions: ['watch_video'] });
@@ -155,7 +161,7 @@ test('限定动作执行不会触发同组其他写操作', { concurrency: false
     assert.equal(calls.some(url => url.includes('/heartbeat')), true);
     assert.equal(calls.some(url => url.includes('/share/add')), false);
     assert.equal(db.getDailyAction(account.id, taskDate, 'share_video')?.status, 'skipped');
-  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await db?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('观看视频使用排行榜目标并提交脱敏所需的心跳字段', { concurrency: false }, async () => {
@@ -308,6 +314,7 @@ test('直播心跳使用 B 站要求的数字房间字段', { concurrency: false
 test('带目标的每日动作只保存一次请求尝试', { concurrency: false }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-attempt-dedupe-'));
   const originalFetch = globalThis.fetch;
+  let db: AppDatabase | undefined;
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = String(input);
     if (url.includes('/x/web-interface/nav')) return jsonResponse({ code: 0, data: { isLogin: true, mid: 9013 } });
@@ -317,7 +324,7 @@ test('带目标的每日动作只保存一次请求尝试', { concurrency: false
     return jsonResponse({ code: -404, message: 'unexpected' }, 404);
   }) as typeof fetch;
   try {
-    const db = await AppDatabase.create(join(directory, 'test.db'));
+    db = await AppDatabase.create(join(directory, 'test.db'));
     const account = db.createAccount({ uid: '9013', cookie: encrypt('DedeUserID=9013; bili_jct=test') })!;
     const config = mergeDailyConfig({ experience: { share: true }, requestDelay: 0, retryTimes: 0 });
     const result = await new DailyTaskRunner(db).run(account, 42, config, { actions: ['share_video'] });
@@ -326,7 +333,7 @@ test('带目标的每日动作只保存一次请求尝试', { concurrency: false
     assert.equal(attempts.length, 1);
     assert.equal(attempts[0].target_id, 'BV1dedupe');
     assert.equal(attempts[0].provider_code, -500);
-  } finally { globalThis.fetch = originalFetch; rmSync(directory, { recursive: true, force: true }); }
+  } finally { globalThis.fetch = originalFetch; await db?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('投币遵守今日上限、余额保护并记录目标视频', { concurrency: false }, async () => {

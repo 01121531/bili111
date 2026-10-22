@@ -1,5 +1,6 @@
 import initSqlJs, { Database as SqlDatabase } from 'sql.js';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { open, rename, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { hashPassword } from './security';
 
@@ -22,16 +23,99 @@ export type DailyActionInput = {
   startedAt?: string; finishedAt?: string;
 };
 export type DailyAttemptInput = { status: string; reason?: string | null; providerCode?: number | null; providerMessage?: string | null; errorType?: string | null; httpStatus?: number | null; transportCode?: string | null; retryable?: boolean; attemptCount?: number };
+export type AppDatabaseOptions = { flushIntervalMs?: number };
 
 export class AppDatabase {
-  private constructor(private db: SqlDatabase, private filename: string) {}
-  static async create(filename = process.env.DATABASE_PATH || join(process.cwd(), 'data', 'lottery.db')) {
+  private dirty = false;
+  private closed = false;
+  private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private flushChain: Promise<void> = Promise.resolve();
+  private readonly flushIntervalMs: number;
+
+  private constructor(private db: SqlDatabase, private filename: string, options: AppDatabaseOptions = {}) {
+    const configured = Number(options.flushIntervalMs ?? process.env.DATABASE_FLUSH_INTERVAL_MS);
+    this.flushIntervalMs = Number.isFinite(configured) ? Math.min(60000, Math.max(1000, configured)) : 5000;
+  }
+
+  static async create(filename = process.env.DATABASE_PATH || join(process.cwd(), 'data', 'lottery.db'), options: AppDatabaseOptions = {}) {
     mkdirSync(dirname(filename), { recursive: true });
     const SQL = await initSqlJs({ locateFile: file => require.resolve(`sql.js/dist/${file}`) });
     const db = existsSync(filename) ? new SQL.Database(new Uint8Array(readFileSync(filename))) : new SQL.Database();
-    const app = new AppDatabase(db, filename); app.migrate(); return app;
+    const app = new AppDatabase(db, filename, options);
+    app.migrate();
+    await app.flushNow();
+    return app;
   }
-  private flush() { writeFileSync(this.filename, Buffer.from(this.db.export())); }
+
+  private scheduleFlush() {
+    if (this.closed || this.flushTimer) return;
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = null;
+      void this.flushNow().catch(error => console.error('数据库异步落盘失败', error instanceof Error ? error.message : String(error)));
+    }, this.flushIntervalMs);
+    this.flushTimer.unref?.();
+  }
+
+  private markDirty() {
+    if (this.closed) return;
+    this.dirty = true;
+    this.scheduleFlush();
+  }
+
+  private async writeSnapshot(snapshot: Buffer) {
+    const temporary = `${this.filename}.${process.pid}.tmp`;
+    const handle = await open(temporary, 'w', 0o640);
+    try {
+      await handle.writeFile(snapshot);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await rename(temporary, this.filename);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
+    try {
+      const directory = await open(dirname(this.filename), 'r');
+      try { await directory.sync(); } finally { await directory.close(); }
+    } catch { /* 部分平台不允许同步目录，文件本身已完成 fsync */ }
+  }
+
+  async flushNow() {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    if (!this.dirty) return this.flushChain;
+    const snapshot = Buffer.from(this.db.export());
+    this.dirty = false;
+    const next = this.flushChain
+      .catch(() => undefined)
+      .then(() => this.writeSnapshot(snapshot));
+    this.flushChain = next;
+    try {
+      await next;
+    } catch (error) {
+      this.dirty = true;
+      this.scheduleFlush();
+      throw error;
+    }
+  }
+
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    await this.flushNow();
+    this.db.close();
+  }
+
+  private flush() { this.markDirty(); }
   private rows<T = any>(sql: string, params: any[] = []) { const statement = this.db.prepare(sql); statement.bind(params); const result: T[] = []; while (statement.step()) result.push(statement.getAsObject() as T); statement.free(); return result; }
   private row<T = any>(sql: string, params: any[] = []) { return this.rows<T>(sql, params)[0] as T | undefined; }
   private run(sql: string, params: any[] = []) { const statement = this.db.prepare(sql); statement.bind(params); statement.step(); statement.free(); this.flush(); }

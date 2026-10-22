@@ -95,6 +95,7 @@ app.post('/api/auth/change-password', { preHandler: auth }, async (request, repl
   if (body.newPassword.length < 6) return reply.code(400).send({ error: '新密码至少需要 6 个字符' });
   if (body.newPassword !== body.confirmPassword) return reply.code(400).send({ error: '两次输入的新密码不一致' });
   db.setSetting('admin_password_hash', hashPassword(body.newPassword));
+  await db.flushNow();
   return { ok: true };
 });
 
@@ -428,9 +429,30 @@ const dist = join(process.cwd(), 'web', 'dist');
 if (existsSync(dist)) { await app.register(fastifyStatic, { root: dist }); app.setNotFoundHandler((request, reply) => request.raw.url?.startsWith('/api/') ? reply.code(404).send({ error: '接口不存在' }) : reply.sendFile('index.html')); }
 
 const port = Number(process.env.PORT || 6666);
-app.addHook('onClose', async () => { accountSchedules.stop(); enricher.stop(); await scheduler.longTasks.shutdown(); });
+app.addHook('onClose', async () => {
+  accountSchedules.stop();
+  enricher.stop();
+  await scheduler.longTasks.shutdown();
+  await db.flushNow();
+});
 await app.listen({ port, host: process.env.HOST || '0.0.0.0' });
 console.log(`Lottery web console listening on http://localhost:${port}`);
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`收到 ${signal}，正在安全停止服务`);
+  try {
+    await app.close();
+  } catch (error) {
+    console.error('服务关闭失败', error instanceof Error ? error.message : String(error));
+  } finally {
+    try { await db.flushNow(); } catch (error) { console.error('退出前数据库落盘失败', error instanceof Error ? error.message : String(error)); }
+    process.exit(0);
+  }
+}
+process.once('SIGTERM', () => void shutdown('SIGTERM'));
+process.once('SIGINT', () => void shutdown('SIGINT'));
 void verifier.verifyAll('unknown').catch(error => console.error('自动验证账号失败', error instanceof Error ? error.message : String(error)));
 enricher.start();
 }

@@ -33,10 +33,12 @@ test('AI 地址和 Key 保存后重新打开数据库仍保持新值', async () 
     assert.equal(saved.apiKeyConfigured, true); assert.match(saved.apiKeyHint, /-key$/);
     assert.equal('apiKey' in saved, false);
 
+    await item.db.flushNow();
     const reopened = await AppDatabase.create(join(item.directory, 'test.db'));
     const persisted = new AiService(reopened);
     assert.equal(persisted.getGlobalPublic().baseUrl, 'https://new-ai.example/v1/chat/completions');
     assert.equal(persisted.resolve(1).apiKey, 'new-secret-key');
+    await reopened.close();
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
 

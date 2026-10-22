@@ -50,6 +50,7 @@ test('历史日志只有唯一匹配时恢复真实错误，歧义记录保持�
     item.db.addLog(item.runId, item.account.id, 'info', 'engine', JSON.stringify({ code: -107, message: '账号未转正' }));
     item.db.addLog(item.runId, item.account.id, 'warn', '抽奖信息', 'dyid: 90001, rid: 1');
     (item.db as any).run("DELETE FROM system_settings WHERE key='participation_error_backfill_v1'");
+    await item.db.flushNow();
 
     const migrated = await AppDatabase.create(item.filename);
     const attempts = migrated.getParticipationAttempts(record.id);
@@ -60,7 +61,10 @@ test('历史日志只有唯一匹配时恢复真实错误，歧义记录保持�
     assert.match(participation.result_reason, /-107.*账号未转正/);
 
     (migrated as any).run("DELETE FROM system_settings WHERE key='participation_error_backfill_v1'");
+    await migrated.flushNow();
     const rerun = await AppDatabase.create(item.filename);
     assert.equal(rerun.getParticipationAttempts(record.id).length, 1);
+    await migrated.close();
+    await rerun.close();
   } finally { rmSync(item.directory, { recursive: true, force: true }); }
 });
