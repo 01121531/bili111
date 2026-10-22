@@ -16,6 +16,14 @@ NEW_COMMIT=""
 PACKAGE_MODE="false"
 TMP_DIR=""
 
+# 服务单元启用了 ProtectHome=true，sudo 子进程看不到 /root。
+# npm 若继续使用 /root/.npm 会报 ENOENT，并在清理 node_modules 后安装失败。
+# 因此固定使用独立、可写的 HOME/缓存目录，并显式指定国内镜像。
+export HOME="/var/lib/lottery-web-home"
+export npm_config_cache="/var/cache/lottery-web-npm"
+export npm_config_registry="https://mirrors.tencentyun.com/npm"
+mkdir -p "$HOME" "$npm_config_cache"
+
 mkdir -p "$DATA_DIR" "$BACKUP_DIR"
 touch "$LOG_FILE"
 exec >>"$LOG_FILE" 2>&1
