@@ -101,10 +101,23 @@ NODE
   chown lottery-web:lottery-web "$STATE_FILE" "$LOG_FILE" 2>/dev/null || true
 }
 
+normalize_runtime_permissions() {
+  mkdir -p "$DATA_DIR" "$PACKAGE_DIR"
+  chown lottery-web:lottery-web "$DATA_DIR" "$PACKAGE_DIR" || return 1
+  for name in lottery.db .encryption-key update-state.json update.log; do
+    if [ -e "$DATA_DIR/$name" ]; then
+      chown lottery-web:lottery-web "$DATA_DIR/$name" || return 1
+    fi
+  done
+  [ ! -f "$DATA_DIR/lottery.db" ] || chmod 640 "$DATA_DIR/lottery.db"
+  [ ! -f "$DATA_DIR/.encryption-key" ] || chmod 600 "$DATA_DIR/.encryption-key"
+}
+
 restore_data() {
   for name in lottery.db .encryption-key; do
     if [ -f "$BACKUP_DIR/$name" ]; then cp -f "$BACKUP_DIR/$name" "$DATA_DIR/$name"; fi
   done
+  normalize_runtime_permissions
 }
 
 rollback() {
@@ -114,6 +127,7 @@ rollback() {
     git -C "$APP_DIR" reset --hard "$OLD_COMMIT" || true
   fi
   restore_data
+  normalize_runtime_permissions || log "警告: 恢复文件权限失败"
   cd "$APP_DIR" || true
   npm ci --no-audit --no-fund || true
   npm run web:typecheck || true
@@ -140,6 +154,7 @@ NODE
 write_state running "" false
 cp -f "$DATA_DIR/lottery.db" "$BACKUP_DIR/lottery.db" 2>/dev/null || true
 cp -f "$DATA_DIR/.encryption-key" "$BACKUP_DIR/.encryption-key" 2>/dev/null || true
+normalize_runtime_permissions || rollback "无法设置数据库和加密密钥权限"
 
 if [ ! -f "$PACKAGE_FILE" ] || [ ! -f "$PACKAGE_METADATA" ]; then rollback "未找到本地发布包，请先在控制台上传"; fi
 PACKAGE_MODE="true"
@@ -156,6 +171,7 @@ systemctl is-active --quiet "$SERVICE_NAME" || rollback "systemd 服务未运行
 wait_for_url http://127.0.0.1:6666/ || rollback "6666 健康检查失败"
 wait_for_url http://127.0.0.1:8080/ || rollback "8080 代理检查失败"
 test "$(curl -sS --max-time 15 -o /dev/null -w '%{http_code}' http://127.0.0.1:6666/api/auth/me)" = "401" || rollback "未登录鉴权检查失败"
+normalize_runtime_permissions || rollback "部署后无法设置运行文件权限"
 
 write_state success "" false "$NEW_COMMIT"
 if [ "$PACKAGE_MODE" = "true" ]; then
