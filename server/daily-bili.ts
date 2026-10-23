@@ -667,7 +667,7 @@ export class DailyBiliClient {
     const csrfError = this.requireCsrf(); if (csrfError) return { result: csrfError };
     const status = await this.get<any>(`${API}/x/credit/v2/jury/jury`, 'https://www.bilibili.com', 'https://www.bilibili.com/judgement/index');
     if (!status.ok && (status.result.providerCode === 25006 || /资格已过期|不是风纪委员/.test(status.result.providerMessage || status.result.reason || ''))) {
-      return { result: { status: 'skipped', reason: `风纪委员资格不可用：${status.result.providerMessage || status.result.reason || '无需执行社区众议院'}` } };
+      return { result: { ...status.result, status: 'skipped', retryable: false, reason: `风纪委员资格不可用：${status.result.providerMessage || status.result.reason || '无需执行社区众议院'}` } };
     }
     if (!status.ok) return { result: status.result };
     if (!status.data?.status && this.config.community.juryAutoApply) {

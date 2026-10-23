@@ -160,6 +160,46 @@ export function dailyConfigDiff(value: unknown, inherited: unknown = {}) {
 
 function today() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()); }
 
+function skippedResult(result: DailyResult, reason: string): DailyResult {
+  return { ...result, status: 'skipped', reason, retryable: false };
+}
+
+export function normalizeDailyResult(result: DailyResult): DailyResult {
+  const providerCode = Number(result.providerCode);
+  const message = String(result.providerMessage || result.reason || '');
+  let normalized = result;
+
+  if (providerCode === 25006 || /资格已过期|不是风纪委员/.test(message)) {
+    normalized = skippedResult(result, `风纪委员资格不可用：${result.providerMessage || result.reason || '无需执行社区众议院'}`);
+  } else if (providerCode === 6007000 || /请将客户端更新至最新版本/.test(message)) {
+    normalized = skippedResult(result, `B站客户端/接口不兼容：${result.providerMessage || result.reason || '请更新客户端'}，本次不重试`);
+  } else if (/已经领取过该奖励或者未达到领取条件/.test(message)) {
+    normalized = skippedResult(result, 'B站无法区分已领取或未达到领取条件，本次跳过且不重试');
+  }
+
+  if (normalized.attempts?.length) normalized = { ...normalized, attempts: normalized.attempts.map(normalizeDailyResult) };
+  return normalized;
+}
+
+export function normalizeDailyOutcome(outcome: DailyActionOutcome): DailyActionOutcome {
+  const details = outcome.details?.map(detail => ({ ...detail, result: normalizeDailyResult(detail.result) }));
+  let result = normalizeDailyResult(outcome.result);
+  if (details?.length) {
+    const failures = details.filter(detail => ['failed', 'throttled'].includes(detail.result.status));
+    const successes = details.filter(detail => detail.result.status === 'success');
+    const completed = details.filter(detail => detail.result.status === 'completed');
+    const skipped = details.filter(detail => detail.result.status === 'skipped');
+    if (!failures.length && ['failed', 'throttled'].includes(result.status)) {
+      if (successes.length) result = { ...result, status: 'success', reason: `处理完成：成功 ${successes.length} 项，跳过 ${skipped.length} 项`, retryable: false };
+      else if (completed.length) result = { ...result, status: 'completed', reason: `处理完成：已完成 ${completed.length} 项，跳过 ${skipped.length} 项`, retryable: false };
+      else if (skipped.length) result = { ...result, ...skippedResult(skipped[0].result, skipped.length === 1 ? skipped[0].result.reason : `本轮 ${skipped.length} 项均无需执行`) };
+    } else if (failures.length && !['failed', 'throttled'].includes(result.status)) {
+      result = { ...result, status: failures.some(detail => detail.result.status === 'throttled') ? 'throttled' : 'failed', reason: `部分任务失败：${failures.length} 项，详见目标记录`, retryable: failures.some(detail => detail.result.retryable) };
+    }
+  }
+  return { ...outcome, result, details };
+}
+
 export const dailyActionSupport: Record<string, { supported: boolean; note?: string }> = {
   daily_login: { supported: true }, watch_video: { supported: true }, share_video: { supported: true }, coin_video: { supported: true },
   live_lottery: { supported: true }, manga_sign: { supported: true }, manga_read: { supported: true }, manga_privilege: { supported: true },
@@ -224,7 +264,13 @@ export class DailyTaskRunner {
       enabled = enabled && (!selectedActions.length || selectedActions.includes(action));
       const existing = this.db.getDailyAction(account.id, taskDate, action); if (existing && ['success', 'completed'].includes(String(existing.status))) { skipped += 1; return; }
       if (!enabled) { skipped += 1; await record(action, { status: 'skipped', reason: '配置未启用，未发送写请求' }); return; }
-      attempted += 1; const outcome = await fn();
+      attempted += 1;
+      let outcome: DailyActionOutcome;
+      try {
+        outcome = normalizeDailyOutcome(await fn());
+      } catch (error) {
+        outcome = { result: { status: 'failed', reason: `执行异常：${error instanceof Error ? error.message : String(error)}`, errorType: 'local', retryable: false } };
+      }
       for (const detail of outcome.details || []) await record(action, detail.result, detail.targetId, detail.result.status === 'failed' ? 1 : 0);
       if (outcome.targetId) await record(action, outcome.result, outcome.targetId, outcome.result.status === 'failed' ? 1 : 0);
       await record(action, outcome.result, '', outcome.result.status === 'failed' ? 1 : 0, !(outcome.targetId || outcome.details?.length));

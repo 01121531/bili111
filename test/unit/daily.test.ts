@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AppDatabase } from '../../server/db';
-import { DailyTaskRunner, defaultDailyConfig, mergeDailyConfig } from '../../server/daily';
+import { DailyTaskRunner, defaultDailyConfig, mergeDailyConfig, normalizeDailyOutcome, normalizeDailyResult } from '../../server/daily';
 import { DailyBiliClient } from '../../server/daily-bili';
 import { LongTaskManager, safeMediaName } from '../../server/live-tasks';
 import { encrypt } from '../../server/security';
@@ -48,6 +48,54 @@ test('BiliOutils 扩展动作默认关闭并限制资源与长任务上限', () 
   assert.equal(effective.streaming.maxDurationMinutes, 360);
   assert.match(safeMediaName('video.MP4'), /\.mp4$/);
   assert.throws(() => safeMediaName('payload.exe'), /不支持的媒体格式/);
+});
+
+test('每日任务的不可用业务状态统一记录为跳过且不重试', () => {
+  const jury = normalizeDailyOutcome({
+    result: { status: 'failed', reason: '社区众议院失败' },
+    details: [{ targetId: 'case-1', result: { status: 'failed', providerCode: 25006, providerMessage: '风纪委员资格已过期', errorType: 'bili_api' } }]
+  });
+  assert.equal(jury.result.status, 'skipped');
+  assert.equal(jury.details?.[0].result.status, 'skipped');
+  assert.equal(jury.details?.[0].result.retryable, false);
+
+  const vip = normalizeDailyOutcome({
+    result: { status: 'failed', reason: 'VIP 大积分部分任务失败' },
+    details: [{ targetId: 'ogvwatchnew', result: { status: 'failed', providerCode: 6007000, providerMessage: '请将客户端更新至最新版本' } }]
+  });
+  assert.equal(vip.result.status, 'skipped');
+  assert.match(vip.result.reason, /客户端\/接口不兼容/);
+
+  const manga = normalizeDailyResult({ status: 'failed', providerCode: 1, providerMessage: '已经领取过该奖励或者未达到领取条件哦~' });
+  assert.equal(manga.status, 'skipped');
+  assert.match(manga.reason, /无法区分已领取或未达到领取条件/);
+});
+
+test('风纪委员资格过期落库为跳过且不使每日任务失败', { concurrency: false }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-skip-'));
+  const originalFetch = globalThis.fetch;
+  let db: AppDatabase | undefined;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/x/web-interface/nav')) return jsonResponse({ code: 0, data: { isLogin: true, mid: 9014 } });
+    if (url.includes('/x/credit/v2/jury/jury')) return jsonResponse({ code: 25006, message: '风纪委员资格已过期' });
+    return jsonResponse({ code: -404, message: 'unexpected' }, 404);
+  }) as typeof fetch;
+  try {
+    db = await AppDatabase.create(join(directory, 'test.db'));
+    const account = db.createAccount({ uid: '9014', cookie: encrypt('DedeUserID=9014; bili_jct=test') })!;
+    const result = await new DailyTaskRunner(db).run(account, 77, mergeDailyConfig({ community: { jury: true }, requestDelay: 0, retryTimes: 0 }), { actions: ['jury_vote'] });
+    assert.equal(result.code, 0);
+    assert.equal(result.failed, 0);
+    const row = (db.listDailyActions(77) as any[]).find(item => item.action === 'jury_vote');
+    assert.equal(row.status, 'skipped');
+    assert.equal(row.provider_code, 25006);
+    assert.match(row.reason, /风纪委员资格不可用/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    await db?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('每日动作尝试和首次风险确认按账号持久化', async () => {
