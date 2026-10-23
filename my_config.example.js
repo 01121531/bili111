@@ -325,6 +325,22 @@ module.exports = Object.freeze({
         create_dy_mode: [[0], [0]],
 
         /**
+         * 每成功转发指定数量的抽奖动态后分享推荐视频
+         * 0 表示关闭
+         */
+        share_video_every_forwards: 0,
+
+        /**
+         * 每次达到转发阈值时分享的视频数量
+         */
+        share_video_count_per_trigger: 0,
+
+        /**
+         * 全部抽奖转发结束后分享的推荐视频数量
+         */
+        share_video_after_run: 0,
+
+        /**
          * 转发时[at]的用户
          */
         at_users: [['转发抽奖娘', 294887687], ['你的工具人老公', 100680137]],
@@ -334,6 +350,11 @@ module.exports = Object.freeze({
          * - 英文逗号分隔 如: 1,2,3
          */
         blacklist: '',
+
+        /**
+         * 按抽奖实际发起人 UID 屏蔽，不匹配转发者 UID
+         */
+        blocked_lottery_uids: [],
 
         /**
          * 屏蔽词
@@ -394,6 +415,11 @@ module.exports = Object.freeze({
          * 是否抄热评
          */
         is_copy_chat: false,
+
+        /**
+         * AI 评论未启用、失败或返回空内容时，复制当前动态评论区
+         */
+        copy_chat_on_ai_failure: true,
 
         /**
          * 热评屏蔽词

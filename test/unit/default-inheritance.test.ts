@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AppDatabase } from '../../server/db';
 import { AccountScheduleService, builtInScheduleDefaults, nextScheduleRun, validateScheduleDefaults } from '../../server/account-schedules';
-import { diffFromBase, mergedConfig, publicConfigPayload, runtimeConfig } from '../../server/config';
+import { diffFromBase, mergedConfig, publicConfigPayload, runtimeConfig, validateWebConfig } from '../../server/config';
 
 async function databaseFixture() {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-defaults-'));
@@ -40,6 +40,18 @@ test('默认账号配置按内置、默认和账号覆盖顺序合并', () => {
   assert.equal(runtime.config_7.maxday, Infinity);
   assert.equal(runtime.default_config.chatmodel, '11');
   assert.equal(mergedConfig({ chatmodel: '01' }).chatmodel, '11');
+  assert.deepEqual(mergedConfig().blocked_lottery_uids, []);
+  assert.equal(mergedConfig().copy_chat_on_ai_failure, true);
+  assert.equal(mergedConfig().share_video_every_forwards, 0);
+  assert.equal(mergedConfig().share_video_count_per_trigger, 0);
+  assert.equal(mergedConfig().share_video_after_run, 0);
+});
+
+test('屏蔽抽奖发起人 UID 保存时清理非法值并去重', () => {
+  const effective = validateWebConfig({
+    blocked_lottery_uids: [123, '456', 123, 0, -1, 1.5, 'bad']
+  });
+  assert.deepEqual(effective.blocked_lottery_uids, [123, 456]);
 });
 
 test('恢复默认和应用到全部账号只清除业务覆盖并保留 AI', async () => {

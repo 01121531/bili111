@@ -56,6 +56,7 @@ export const configFields: ConfigField[] = [
   number('minfollower', 'rules', '发起人最低粉丝数', '低于该粉丝数的非官方抽奖将被过滤。', 0, 100000000, '人'),
   toggle('only_followed', 'rules', '只参与已关注账号', '只处理当前已关注用户发起的抽奖。'),
   { key: 'blacklist', category: 'rules', label: '黑名单', description: '动态 ID 或 UID，使用英文逗号分隔。', type: 'textarea' },
+  list('blocked_lottery_uids', 'rules', '屏蔽抽奖发起人 UID', '仅匹配抽奖实际发起人，不匹配转发者、动态 ID 或旧黑名单规则。', true),
   list('blockword', 'rules', '屏蔽词', '正文命中任一词时不参与。'),
   { key: 'blockword_match_mode', category: 'rules', label: '屏蔽词匹配模式', description: '普通文字模式按原文包含匹配；正则模式兼容原有正则表达式配置。', type: 'select', options: [{ value: 'literal', label: '普通文字（推荐）' }, { value: 'regex', label: '正则表达式' }] },
 
@@ -64,6 +65,7 @@ export const configFields: ConfigField[] = [
   list('relay', 'actions', '固定转发文案', 'AI 不可用或未启用时随机选择。'),
   list('chat', 'actions', '固定评论文案', 'AI 不可用或未启用时随机选择。'),
   toggle('is_copy_chat', 'actions', '复制热门评论', '从动态热门评论中选择可用文案。'),
+  toggle('copy_chat_on_ai_failure', 'actions', 'AI 评论失败时复制评论', 'AI 未启用、失败或返回空内容时，复制当前动态评论区；无可用评论时再回退备用和固定文案。'),
   list('copy_blockword', 'actions', '热门评论屏蔽词', '热门评论命中任一词时不使用。'),
   { key: 'at_users', category: 'actions', label: '@ 用户列表', description: '二维数组格式：[名称, UID]。', type: 'json' },
   number('partition_id', 'actions', '临时关注分组 ID', 'B 站关注分组的数字 ID，0 表示自动获取。', 0, 999999999),
@@ -93,6 +95,9 @@ export const configFields: ConfigField[] = [
   number('create_dy_num', 'random', '结束时发送数量', '任务结束时发送的随机动态数量。', 0, 100, '条'),
   { key: 'dy_contents', category: 'random', label: '随机动态内容', description: '普通文本或图片对象数组；可在高级 JSON 中精确调整。', type: 'json' },
   { key: 'create_dy_mode', category: 'random', label: '随机动态插入规则', description: '二维数组，分别表示触发条数和发送条数。', type: 'json' },
+  number('share_video_every_forwards', 'random', '每成功转发多少条触发分享', '只统计转发状态为成功的抽奖动态；0 表示关闭。', 0, 100, '条'),
+  number('share_video_count_per_trigger', 'random', '每次触发分享视频数', '达到上方成功转发数量时立即分享的推荐视频数；0 表示不分享。', 0, 20, '个'),
+  number('share_video_after_run', 'random', '任务结束分享视频数', '全部抽奖处理正常结束后分享的推荐视频数；0 表示关闭。', 0, 20, '个'),
 
   list('notice_key_words', 'winning', '中奖通知关键词', '满足任一规则时生成疑似中奖记录；~ 开头表示排除规则。'),
   toggle('notice_running_state', 'winning', '发送运行状态通知', '保留原 CLI 的运行状态通知。'),
@@ -169,6 +174,17 @@ function sanitizeField(field: ConfigField, value: unknown) {
   }
   if (field.type === 'number-list') {
     if (!Array.isArray(value)) throw new Error(`${field.label}必须是数组`);
+    if (field.key === 'blocked_lottery_uids') {
+      const normalized: number[] = [];
+      const seen = new Set<number>();
+      for (const item of value) {
+        const uid = Number(item);
+        if (!Number.isSafeInteger(uid) || uid <= 0 || seen.has(uid)) continue;
+        seen.add(uid);
+        normalized.push(uid);
+      }
+      return normalized;
+    }
     const values = value.map(item => Number(item));
     if (values.some(item => !Number.isFinite(item) || item < 0)) throw new Error(`${field.label}包含无效数字`);
     return values;
