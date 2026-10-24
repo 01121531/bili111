@@ -355,7 +355,8 @@ test('直播心跳使用 B 站要求的数字房间字段', { concurrency: false
     assert.equal(typeof heartbeatBody.play_type, 'string');
     assert.equal(typeof heartbeatBody.s_time, 'string');
     assert.equal(typeof heartbeatBody.session_id, 'string');
-    assert.equal(typeof heartbeatBody.player_type, 'string');
+    assert.equal(typeof heartbeatBody.player_type, 'number');
+    assert.equal(heartbeatBody.player_type, 0);
   } finally { globalThis.fetch = originalFetch; }
 });
 

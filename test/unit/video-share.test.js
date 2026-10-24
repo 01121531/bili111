@@ -16,7 +16,8 @@ function controller(options = {}) {
         },
         getRecommendations: options.getRecommendations,
         shareVideo: options.shareVideo,
-        maxRecommendationCalls: options.maxRecommendationCalls
+        maxRecommendationCalls: options.maxRecommendationCalls,
+        shareInterval: options.shareInterval ?? 0
     });
 }
 
@@ -101,6 +102,28 @@ test('视频分享失败不会抛出异常或回滚转发结果', async () => {
     });
 
     assert.deepEqual(await item.recordSuccessfulForward(), { triggered: true, shared: 0, successfulForwards: 1 });
+});
+
+test('视频分享触发 B 站限流后停止候选、后续触发和结束分享', async () => {
+    const attempts = [];
+    const item = controller({
+        config: { share_video_every_forwards: 1, share_video_count_per_trigger: 3, share_video_after_run: 2 },
+        getRecommendations: async () => [[1, 501], [2, 502], [3, 503], [4, 504], [5, 505]],
+        shareVideo: async (_uid, aid) => {
+            attempts.push(aid);
+            return {
+                status: 'failed',
+                providerCode: 4128002,
+                providerMessage: '操作太频繁了，请稍后重试',
+                reason: 'B站返回 4128002（操作太频繁了，请稍后重试）'
+            };
+        }
+    });
+
+    assert.deepEqual(await item.recordSuccessfulForward(), { triggered: true, shared: 0, successfulForwards: 1 });
+    assert.deepEqual(await item.recordSuccessfulForward(), { triggered: true, shared: 0, successfulForwards: 2 });
+    assert.deepEqual(await item.finish(), { shared: 0, alreadyFinished: false });
+    assert.deepEqual(attempts, [501]);
 });
 
 test('旧布尔分享接口保持兼容：false 表示成功，true 表示失败', async () => {
