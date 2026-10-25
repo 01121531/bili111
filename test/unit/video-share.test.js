@@ -126,6 +126,28 @@ test('视频分享触发 B 站限流后停止候选、后续触发和结束分�
     assert.deepEqual(attempts, [501]);
 });
 
+test('账号等级不足时停止本轮后续视频分享，避免逐个候选重复失败', async () => {
+    const attempts = [];
+    const item = controller({
+        config: { share_video_every_forwards: 1, share_video_count_per_trigger: 3, share_video_after_run: 2 },
+        getRecommendations: async () => [[1, 601], [2, 602], [3, 603], [4, 604]],
+        shareVideo: async (_uid, aid) => {
+            attempts.push(aid);
+            return {
+                status: 'failed',
+                providerCode: 4126021,
+                providerMessage: '等级不足无法发送，快去努力升级吧',
+                reason: 'B站返回 4126021（等级不足无法发送，快去努力升级吧）'
+            };
+        }
+    });
+
+    assert.deepEqual(await item.recordSuccessfulForward(), { triggered: true, shared: 0, successfulForwards: 1 });
+    assert.deepEqual(await item.recordSuccessfulForward(), { triggered: true, shared: 0, successfulForwards: 2 });
+    assert.deepEqual(await item.finish(), { shared: 0, alreadyFinished: false });
+    assert.deepEqual(attempts, [601]);
+});
+
 test('旧布尔分享接口保持兼容：false 表示成功，true 表示失败', async () => {
     const successful = controller({
         config: { share_video_every_forwards: 1, share_video_count_per_trigger: 1 },

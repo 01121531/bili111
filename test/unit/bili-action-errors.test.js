@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const bili = require('../../lib/net/bili');
 const detailedResult = bili.__testDetailedResult;
+const reserveLotteryDetailedResult = bili.__testReserveLotteryDetailedResult;
 
 test('评论保留已知与未知 B 站错误码和真实信息', async t => {
     const mappings = { [-107]: { internalCode: 13, message: '账号未转正' } };
@@ -27,6 +28,30 @@ test('转发保留等级不足的 B 站错误详情', async () => {
     assert.equal(result.internalCode, 6);
     assert.equal(result.providerCode, 4126021);
     assert.equal(result.providerMessage, '等级不足无法发送，快去努力升级吧');
+});
+
+test('预约抽奖保留真实错误详情并兼容旧返回语义', async t => {
+    await t.test('预约成功', () => {
+        const result = reserveLotteryDetailedResult({ ok: true, body: JSON.stringify({ code: 0 }), httpStatus: 200 }, '123');
+        assert.equal(result.internalCode, 0);
+        assert.equal(result.status, 'success');
+        assert.equal(result.targetId, '123');
+    });
+    await t.test('重复预约', () => {
+        const result = reserveLotteryDetailedResult({ ok: true, body: JSON.stringify({ code: 7604003, message: '已经预约过了' }), httpStatus: 200 }, '123');
+        assert.equal(result.internalCode, 0);
+        assert.equal(result.status, 'already_done');
+        assert.equal(result.providerCode, 7604003);
+        assert.equal(result.providerMessage, '已经预约过了');
+    });
+    await t.test('未知业务错误', () => {
+        const result = reserveLotteryDetailedResult({ ok: true, body: JSON.stringify({ code: 7604999, message: '活动暂不可预约' }), httpStatus: 200 }, '123');
+        assert.equal(result.internalCode, 1);
+        assert.equal(result.providerCode, 7604999);
+        assert.equal(result.providerMessage, '活动暂不可预约');
+        assert.match(result.reason, /7604999.*活动暂不可预约/);
+        assert.equal(result.attempts[0].attemptNo, 1);
+    });
 });
 
 test('HTTP、响应格式和网络错误保留诊断字段且不泄露请求内容', async t => {
