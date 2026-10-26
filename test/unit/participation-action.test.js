@@ -226,6 +226,51 @@ test('转发等级不足后本轮停止后续转发请求，但继续评论和�
     }
 });
 
+test('关注分组公开权限错误本轮只提交一次，后续仍关注新UP主', async () => {
+    const originals = {
+        sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed,
+        autoAttentionDetailed: bili.autoAttentionDetailed,
+        movePartitionDetailed: bili.movePartitionDetailed,
+        autolikeDetailed: bili.autolikeDetailed,
+        autoRelayDetailed: bili.autoRelayDetailed
+    };
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat, is_not_create_partition: config.is_not_create_partition };
+    config.is_copy_chat = false;
+    config.is_repost_then_chat = false;
+    config.is_not_create_partition = false;
+    const calls = [];
+    const taskContext = {};
+    bili.sendChatWithOcrDetailed = async () => detailed('comment');
+    bili.autoAttentionDetailed = async uid => {
+        calls.push(`follow:${uid}`);
+        return detailed('follow', 0, { targetId: uid });
+    };
+    bili.movePartitionDetailed = async uid => {
+        calls.push(`group:${uid}`);
+        return detailed('follow_group', 1, {
+            targetId: uid,
+            providerCode: 22105,
+            providerMessage: '请先公开关注后再添加分组',
+            reason: 'B站返回 22105（请先公开关注后再添加分组）'
+        });
+    };
+    bili.autolikeDetailed = async () => detailed('like');
+    bili.autoRelayDetailed = async () => detailed('relay');
+    try {
+        const first = await new Monitor(['FollowFeed', 1], taskContext).go(option({ dyid: '500000005', uid: ['991'] }));
+        const second = await new Monitor(['FollowFeed', 1], taskContext).go(option({ dyid: '500000006', uid: ['992'] }));
+        assert.equal(first.follow.status, 'failed');
+        assert.equal(second.follow.status, 'failed');
+        assert.match(second.follow.reason, /B站返回 22105（请先公开关注后再添加分组）/);
+        assert.match(second.follow.reason, /本轮后续关注分组请求已停止/);
+        assert.equal(second.follow.attempts.filter(item => item.action === 'follow_group').length, 0);
+        assert.deepEqual(calls, ['follow:991', 'group:991', 'follow:992']);
+    } finally {
+        Object.assign(bili, originals);
+        Object.assign(config, originalConfig);
+    }
+});
+
 test('永久错误短路仅作用于当前账号的本轮上下文', async () => {
     const original = bili.sendChatWithOcrDetailed;
     const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
