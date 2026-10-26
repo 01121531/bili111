@@ -6,6 +6,24 @@ import { EmailNotificationService } from './notifications';
 import { DailyTaskRunner, mergeDailyConfig } from './daily';
 import { LongTaskManager } from './live-tasks';
 
+export type RunCounts = { partial?: number; failed?: number };
+
+export function resolveRunStatus(code: number, result: RunCounts): 'success' | 'partial' | 'failed' {
+  const failed = Math.max(0, Number(result.failed) || 0);
+  const partial = Math.max(0, Number(result.partial) || 0);
+  if (code !== 0 || failed > 0) return 'failed';
+  if (partial > 0) return 'partial';
+  return 'success';
+}
+
+export function runStatusMessage(status: 'success' | 'partial' | 'failed', result: RunCounts): string | undefined {
+  const failed = Math.max(0, Number(result.failed) || 0);
+  const partial = Math.max(0, Number(result.partial) || 0);
+  if (status === 'failed') return `任务失败：${failed > 0 ? `${failed} 个目标失败` : '执行过程中发生错误'}${partial > 0 ? `，${partial} 个目标部分完成` : ''}`;
+  if (status === 'partial') return `任务部分完成：${partial} 个目标存在失败动作`;
+  return undefined;
+}
+
 export class SerialScheduler {
   queue: number[] = [];
   running = false;
@@ -49,9 +67,9 @@ export class SerialScheduler {
         } else {
           result = await this.engine.run(jobId, runId, account, job.type, this.db.getConfig(account.id), options);
         }
-        const status = result.code === 0 ? 'success' : 'failed';
+        const status = resolveRunStatus(result.code, result);
         this.db.finishRun(runId, status, { discovered_count: result.discovered, candidate_count: result.candidates, attempted_count: result.attempted, success_count: result.success, participated_count: result.success, partial_count: result.partial, failed_count: result.failed, error_count: result.errors });
-        this.db.updateJob(jobId, status, { finishedAt: new Date().toISOString(), error: status === 'failed' ? `退出码 ${result.code}` : undefined });
+        this.db.updateJob(jobId, status, { finishedAt: new Date().toISOString(), error: runStatusMessage(status, result) });
         this.publish({ type: 'job', payload: this.db.getJob(jobId) });
       } catch (error) {
         this.db.finishRun(runId, 'failed', { error: String(error) }); this.db.updateJob(jobId, 'failed', { finishedAt: new Date().toISOString(), error: String(error) });

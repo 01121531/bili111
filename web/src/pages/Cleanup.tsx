@@ -68,11 +68,17 @@ export function CleanupPage({ accounts, onNotify }: AnyObject) {
           };
           setResult(merged);
         }
-        const finished = watched.length === watchedJobIds.length && watched.every(item => ['success', 'failed', 'cancelled', 'skipped'].includes(item.status));
+        const finished = watched.length === watchedJobIds.length && watched.every(item => ['success', 'partial', 'failed', 'cancelled', 'skipped'].includes(item.status));
         if (finished) {
           setWatchedJobIds([]); setBusy(false); setRecentRuns(runs.filter(item => ['clear', 'clear_preview'].includes(item.type) && (scope === 'default' || Number(item.account_id) === Number(accountId))).slice(0, 8));
-          const failed = watched.filter(item => item.status !== 'success').length;
-          onNotify(failed ? `${failed} 个开奖清理任务失败，请查看明细` : `${watched.length > 1 ? `${watched.length} 个账号的` : ''}开奖清理已完成`);
+          const failed = watched.filter(item => item.status === 'failed').length;
+          const partial = watched.filter(item => item.status === 'partial').length;
+          const prefix = watched.length > 1 ? `${watched.length} 个账号的` : '';
+          onNotify(failed
+            ? `${failed} 个开奖清理任务失败，请查看明细`
+            : partial
+              ? `${prefix}开奖清理有 ${partial} 个任务部分完成，请查看明细`
+              : `${prefix}开奖清理已完成`);
           return;
         }
       } catch (error) { if (!stopped) onNotify((error as Error).message); }

@@ -206,8 +206,33 @@ export class AppDatabase {
     this.db.run('CREATE INDEX IF NOT EXISTS idx_lotteries_cleanup_protection ON lotteries(account_id,source_created_at,participation_status)');
     this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_win_events_event_key ON win_events(event_key) WHERE event_key IS NOT NULL');
     this.recoverHistoricalParticipationErrors();
+    this.repairRunStatuses();
     this.db.run("UPDATE long_task_sessions SET status='interrupted',finished_at=COALESCE(finished_at,datetime('now')),error=COALESCE(error,'服务重启导致任务中断') WHERE status IN ('pending','running','cancelling')");
     this.flush(); if (!this.getSetting('admin_password_hash')) this.setSetting('admin_password_hash', hashPassword(process.env.ADMIN_PASSWORD || 'admin'));
+  }
+  private repairRunStatuses() {
+    const marker = 'run_status_consistency_v1';
+    if (this.row<{ value: string }>('SELECT value FROM system_settings WHERE key=?', [marker])) return;
+    this.db.run('BEGIN');
+    try {
+      this.db.run(`UPDATE runs SET status='failed',
+        error=CASE WHEN error IS NULL OR error='' OR error LIKE '退出码 %' THEN '历史状态修正：任务存在失败目标' ELSE error END
+        WHERE status='success' AND failed_count>0`);
+      this.db.run(`UPDATE runs SET status='partial',
+        error=CASE WHEN error IS NULL OR error='' OR error LIKE '退出码 %' THEN '历史状态修正：任务存在部分完成目标' ELSE error END
+        WHERE status='success' AND partial_count>0`);
+      this.db.run(`UPDATE jobs SET status='failed',
+        error=CASE WHEN error IS NULL OR error='' OR error LIKE '退出码 %' THEN '历史状态修正：任务存在失败目标' ELSE error END
+        WHERE status='success' AND id IN (SELECT job_id FROM runs WHERE status='failed')`);
+      this.db.run(`UPDATE jobs SET status='partial',
+        error=CASE WHEN error IS NULL OR error='' OR error LIKE '退出码 %' THEN '历史状态修正：任务存在部分完成目标' ELSE error END
+        WHERE status='success' AND id IN (SELECT job_id FROM runs WHERE status='partial')`);
+      this.db.run('INSERT INTO system_settings(key,value) VALUES (?,?)', [marker, new Date().toISOString()]);
+      this.db.run('COMMIT');
+    } catch (error) {
+      this.db.run('ROLLBACK');
+      throw error;
+    }
   }
   private recoverHistoricalParticipationErrors() {
     const marker = 'participation_error_backfill_v1';

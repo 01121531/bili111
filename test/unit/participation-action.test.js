@@ -167,3 +167,87 @@ test('多个关注目标分别保留目标和失败原因', async () => {
         Object.assign(bili, originals); Object.assign(config, originalConfig);
     }
 });
+
+test('账号未转正后本轮停止后续评论请求，但继续点赞和转发', async () => {
+    const originals = { sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed, autolikeDetailed: bili.autolikeDetailed, autoRelayDetailed: bili.autoRelayDetailed };
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
+    config.is_copy_chat = false; config.is_repost_then_chat = false;
+    const calls = [];
+    const taskContext = {};
+    bili.sendChatWithOcrDetailed = async () => {
+        calls.push('comment');
+        return detailed('comment', 13, { providerCode: -107, providerMessage: '账号未转正', reason: 'B站返回 -107（账号未转正）' });
+    };
+    bili.autolikeDetailed = async () => { calls.push('like'); return detailed('like'); };
+    bili.autoRelayDetailed = async () => { calls.push('relay'); return detailed('relay'); };
+    try {
+        const first = await new Monitor(['FollowFeed', 1], taskContext).go(option({ dyid: '500000001', rid: 'rid-1' }));
+        const second = await new Monitor(['FollowFeed', 1], taskContext).go(option({ dyid: '500000002', rid: 'rid-2' }));
+        assert.equal(first.overallStatus, 'partial');
+        assert.equal(second.overallStatus, 'partial');
+        assert.equal(second.comment.status, 'failed');
+        assert.match(second.comment.reason, /B站返回 -107（账号未转正）/);
+        assert.match(second.comment.reason, /本轮后续评论请求已停止/);
+        assert.equal(second.comment.attempts.length, 0);
+        assert.equal(second.like.status, 'success');
+        assert.equal(second.relay.status, 'success');
+        assert.deepEqual(calls, ['comment', 'like', 'relay', 'like', 'relay']);
+    } finally {
+        Object.assign(bili, originals); Object.assign(config, originalConfig);
+    }
+});
+
+test('转发等级不足后本轮停止后续转发请求，但继续评论和点赞', async () => {
+    const originals = { sendChatWithOcrDetailed: bili.sendChatWithOcrDetailed, autolikeDetailed: bili.autolikeDetailed, autoRelayDetailed: bili.autoRelayDetailed };
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
+    config.is_copy_chat = false; config.is_repost_then_chat = false;
+    const calls = [];
+    const taskContext = {};
+    bili.sendChatWithOcrDetailed = async () => { calls.push('comment'); return detailed('comment'); };
+    bili.autolikeDetailed = async () => { calls.push('like'); return detailed('like'); };
+    bili.autoRelayDetailed = async () => {
+        calls.push('relay');
+        return detailed('relay', 6, { providerCode: 4126021, providerMessage: '等级不足无法发送，快去努力升级吧', reason: 'B站返回 4126021（等级不足无法发送，快去努力升级吧）' });
+    };
+    try {
+        const first = await new Monitor(['FollowFeed', 1], taskContext).go(option({ dyid: '500000003', rid: 'rid-3' }));
+        const second = await new Monitor(['FollowFeed', 1], taskContext).go(option({ dyid: '500000004', rid: 'rid-4' }));
+        assert.equal(first.overallStatus, 'partial');
+        assert.equal(second.overallStatus, 'partial');
+        assert.equal(second.relay.status, 'failed');
+        assert.match(second.relay.reason, /B站返回 4126021（等级不足无法发送，快去努力升级吧）/);
+        assert.match(second.relay.reason, /本轮后续转发请求已停止/);
+        assert.equal(second.relay.attempts.length, 0);
+        assert.equal(second.comment.status, 'success');
+        assert.equal(second.like.status, 'success');
+        assert.deepEqual(calls, ['comment', 'like', 'relay', 'comment', 'like']);
+    } finally {
+        Object.assign(bili, originals); Object.assign(config, originalConfig);
+    }
+});
+
+test('永久错误短路仅作用于当前账号的本轮上下文', async () => {
+    const original = bili.sendChatWithOcrDetailed;
+    const originalConfig = { is_copy_chat: config.is_copy_chat, is_repost_then_chat: config.is_repost_then_chat };
+    config.is_copy_chat = false; config.is_repost_then_chat = false;
+    const accountA = {};
+    const accountB = {};
+    let calls = 0;
+    bili.sendChatWithOcrDetailed = async () => {
+        calls += 1;
+        return calls === 1
+            ? detailed('comment', 13, { providerCode: -107, providerMessage: '账号未转正', reason: 'B站返回 -107（账号未转正）' })
+            : detailed('comment');
+    };
+    try {
+        await new Monitor(['FollowFeed', 1], accountA).go(option({ commentOnly: true }));
+        const skipped = await new Monitor(['FollowFeed', 1], accountA).go(option({ commentOnly: true }));
+        const otherAccount = await new Monitor(['FollowFeed', 1], accountB).go(option({ commentOnly: true }));
+        assert.equal(skipped.comment.status, 'failed');
+        assert.equal(otherAccount.comment.status, 'success');
+        assert.equal(calls, 2);
+    } finally {
+        bili.sendChatWithOcrDetailed = original;
+        Object.assign(config, originalConfig);
+    }
+});
