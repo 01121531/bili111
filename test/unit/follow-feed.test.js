@@ -4,7 +4,7 @@ const bili = require('../../lib/net/bili');
 const utils = require('../../lib/utils');
 const dStorage = require('../../lib/helper/d_storage');
 const config = require('../../my_config.example.js').default_config;
-const { Searcher } = require('../../lib/core/searcher');
+const { Searcher, parseDynamicCard, dynamicToLotteryInfo } = require('../../lib/core/searcher');
 const { Monitor } = require('../../lib/core/monitor');
 
 function directItem(id, uid, description) {
@@ -28,6 +28,27 @@ function forwardItem(id, uid, original) {
     item.orig = original;
     return item;
 }
+
+test('评论目标缺少 comment_id_str 时按 comment_id、id_str 依次回退', () => {
+    const withCommentId = directItem('410000001', 101, '抽奖');
+    withCommentId.basic = { comment_id: 420000001 };
+    assert.equal(parseDynamicCard({ item: withCommentId }).rid_str, '420000001');
+
+    const withoutCommentTarget = directItem('430000001', 101, '抽奖');
+    withoutCommentTarget.basic = {};
+    assert.equal(parseDynamicCard({ item: withoutCommentTarget }).rid_str, '430000001');
+});
+
+test('评论目标优先使用 comment_id_str，转发动态使用源动态评论目标', () => {
+    const source = directItem('510000001', 202, '福利 关注参与');
+    const forwarded = parseDynamicCard({ item: forwardItem('910000001', 999, source) });
+    const lottery = dynamicToLotteryInfo(forwarded);
+
+    assert.equal(source.basic.comment_id_str, 'rid-510000001');
+    assert.equal(forwarded.rid_str, 'rid-910000001');
+    assert.equal(lottery.dyid, '510000001');
+    assert.equal(lottery.rid, 'rid-510000001');
+});
 
 test('关注动态流分页、保留末页、解包转发并按动态 ID 去重', async () => {
     const originalGetFollowFeed = bili.getFollowFeed;
