@@ -20,6 +20,26 @@ function cleanRuntimeText(value: unknown, limit = 1000) {
     .slice(0, limit);
 }
 
+export function normalizeEngineLogLine(raw: string, transportLevel: string) {
+  let message = cleanRuntimeText(raw.trim(), 4000) || '';
+  let level = transportLevel;
+  if (/\[(?:Error|错误)\]/i.test(message)) level = 'error';
+  else if (/\[(?:Warn|Warning|警告)\]/i.test(message)) level = 'warn';
+  else if (/\[(?:Debug|调试)\]/i.test(message)) level = 'debug';
+  const responseMatch = message.match(/^\s*\[?\s*(\{[\s\S]*\})\s*[\])}]*\s*$/);
+  if (responseMatch) {
+    try {
+      const response = JSON.parse(responseMatch[1]);
+      if (Number.isFinite(Number(response?.code))) {
+        const providerMessage = cleanRuntimeText(response?.message, 500);
+        message = `B站返回 ${Number(response.code)}${providerMessage ? `（${providerMessage}）` : ''}`;
+        if (Number(response.code) !== 0) level = 'error';
+      }
+    } catch { /* preserve non-JSON log text */ }
+  }
+  return { message, level, normalizedResponse: message.startsWith('B站返回 ') };
+}
+
 export class EngineRunner {
   processes = new Map<number, ChildProcessWithoutNullStreams>();
   constructor(private db: AppDatabase, private emit: (event: object) => void, private ai: AiService, private notifications: EmailNotificationService) {}
@@ -162,24 +182,10 @@ export class EngineRunner {
         catch { processErrors += 1; }
         return;
       }
-      let safe = cleanRuntimeText(message, 4000) || '';
-      let normalizedLevel = level;
-      if (/\[(?:Error|错误)\]/i.test(safe)) normalizedLevel = 'error';
-      else if (/\[(?:Warn|Warning|警告)\]/i.test(safe)) normalizedLevel = 'warn';
-      else if (/\[(?:Debug|调试)\]/i.test(safe)) normalizedLevel = 'debug';
-      if (/^\s*\{.*\}\s*$/.test(safe)) {
-        try {
-          const response = JSON.parse(safe);
-          if (Number.isFinite(Number(response?.code))) {
-            const providerMessage = cleanRuntimeText(response?.message, 500);
-            safe = `B站返回 ${Number(response.code)}${providerMessage ? `（${providerMessage}）` : ''}`;
-            if (Number(response.code) !== 0) normalizedLevel = 'error';
-          }
-        } catch { /* preserve non-JSON log text */ }
-      }
-      if (normalizedLevel === 'error') processErrors += 1;
-      const context = safe.match(/\[帐号\d+ ([^\]]+)/)?.[1] || 'engine';
-      const log = this.db.addLog(runId, account.id, normalizedLevel, context, safe);
+      const normalized = normalizeEngineLogLine(message, level);
+      if (normalized.level === 'error') processErrors += 1;
+      const context = normalized.message.match(/\[帐号\d+ ([^\]]+)/)?.[1] || (normalized.normalizedResponse ? 'B站接口' : 'engine');
+      const log = this.db.addLog(runId, account.id, normalized.level, context, normalized.message);
       this.emit({ type: 'log', payload: log });
     };
     const consume = (chunk: Buffer, level: string) => {
