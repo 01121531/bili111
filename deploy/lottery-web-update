@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -u
 
+WORKER_MODE="${1:-}"
+if [ "$WORKER_MODE" != "--worker" ]; then
+  unit_suffix="${LOTTERY_UPDATE_JOB_ID:-$(date -u +%s)}"
+  exec /usr/bin/systemd-run \
+    --unit="lottery-web-update-$unit_suffix" \
+    --collect \
+    --no-block \
+    --property=Type=oneshot \
+    --setenv="LOTTERY_UPDATE_JOB_ID=$unit_suffix" \
+    /usr/local/sbin/lottery-web-update --worker
+fi
+
 APP_DIR="/opt/bili-dynamic-lottery"
 SERVICE_NAME="lottery-web.service"
 DATA_DIR="$APP_DIR/data"

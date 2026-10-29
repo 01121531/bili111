@@ -147,7 +147,10 @@ export class UpdateService {
     this.writeState({ status: 'running', jobId, currentCommit: current, startedAt: new Date().toISOString(), finishedAt: undefined, error: undefined, rollback: false });
     const child = spawn('sudo', ['-n', UPDATE_SCRIPT], { cwd: process.cwd(), detached: true, stdio: 'ignore', env: { ...process.env, LOTTERY_UPDATE_JOB_ID: jobId } });
     child.on('error', error => { this.writeState({ status: 'failed', finishedAt: new Date().toISOString(), error: String(error) }); this.running = false; });
-    child.on('exit', () => { this.running = false; });
+    child.on('exit', (code, signal) => {
+      this.running = false;
+      if (code !== 0) this.writeState({ status: 'failed', finishedAt: new Date().toISOString(), error: `更新启动器异常退出（${signal || code || 'unknown'}）` });
+    });
     child.unref();
     return { jobId };
   }
