@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const bili = require('../../lib/net/bili');
 const config = require('../../lib/data/config');
 const { Monitor } = require('../../lib/core/monitor');
-const { VideoShareController } = require('../../lib/helper/video_share');
+const { randomDynamic } = require('../../lib/helper/randomDynamic');
+const { VideoShareController, newVideoShareRulesConfigured } = require('../../lib/helper/video_share');
 
 function controller(options = {}) {
     return new VideoShareController({
@@ -43,6 +44,24 @@ test('只按成功转发边界触发分享并在任务结束后完成最终分�
     assert.deepEqual(await item.finish(), { shared: 1, alreadyFinished: false });
     assert.deepEqual(shared, [101, 102, 103, 104, 105]);
     assert.deepEqual(await item.finish(), { shared: 0, alreadyFinished: true });
+});
+
+test('任一新版视频分享规则启用时不再使用旧版随机动态分享入口', () => {
+    assert.equal(newVideoShareRulesConfigured({
+        share_video_every_forwards: 0,
+        share_video_count_per_trigger: 0,
+        share_video_after_run: 0
+    }), false);
+    assert.equal(newVideoShareRulesConfigured({
+        share_video_every_forwards: 3,
+        share_video_count_per_trigger: 0,
+        share_video_after_run: 0
+    }), true);
+    assert.equal(newVideoShareRulesConfigured({
+        share_video_every_forwards: 0,
+        share_video_count_per_trigger: 0,
+        share_video_after_run: 2
+    }), true);
 });
 
 test('不可分享或分享失败的候选会继续尝试其他视频', async () => {
@@ -261,5 +280,109 @@ test('抽奖任务只在转发成功时增加视频分享计数', async () => {
         config.wait = previous.wait;
         config.filter_wait = previous.filter_wait;
         config.create_dy = previous.create_dy;
+    }
+});
+
+test('新版分享配置启用时抽奖循环不调用旧版视频分享接口', { concurrency: false }, async () => {
+    const previous = {
+        NOT_GO_LOTTERY: process.env.NOT_GO_LOTTERY,
+        minfollower: config.minfollower,
+        wait: config.wait,
+        filter_wait: config.filter_wait,
+        create_dy: config.create_dy,
+        create_dy_mode: config.create_dy_mode,
+        create_dy_type: config.create_dy_type,
+        random_dynamic_wait: config.random_dynamic_wait,
+        share_video_every_forwards: config.share_video_every_forwards,
+        share_video_count_per_trigger: config.share_video_count_per_trigger,
+        share_video_after_run: config.share_video_after_run
+    };
+    const originalGetTopRcmd = bili.getTopRcmd;
+    delete process.env.NOT_GO_LOTTERY;
+    Object.assign(config, {
+        minfollower: 0,
+        wait: 0,
+        filter_wait: 0,
+        create_dy: true,
+        create_dy_mode: [[1], [1]],
+        create_dy_type: 1,
+        random_dynamic_wait: 0,
+        share_video_every_forwards: 3,
+        share_video_count_per_trigger: 3,
+        share_video_after_run: 5
+    });
+    let legacyRecommendationCalls = 0;
+    bili.getTopRcmd = async () => {
+        legacyRecommendationCalls += 1;
+        return [[1, 701], [2, 702]];
+    };
+    try {
+        const forwarded = [];
+        const taskContext = {
+            videoShareController: {
+                recordSuccessfulForward: async () => {
+                    forwarded.push('record');
+                    return { triggered: false };
+                },
+                finish: async () => ({ shared: 0 })
+            }
+        };
+        const monitor = new Monitor([], taskContext);
+        monitor.filterLotteryInfo = async () => [
+            { uid: ['123'], dyid: '810000001', isOfficialLottery: false, drawtime: Date.now() / 1000 + 86400, drawTimeSource: 'text' },
+            { uid: ['124'], dyid: '810000002', isOfficialLottery: false, drawtime: Date.now() / 1000 + 86400, drawTimeSource: 'text' }
+        ];
+        monitor.go = async () => ({ code: 0, overallStatus: 'success', reason: '成功', relay: { status: 'success' } });
+
+        await monitor.startLottery();
+
+        assert.equal(legacyRecommendationCalls, 0);
+        assert.deepEqual(forwarded, ['record', 'record']);
+    } finally {
+        bili.getTopRcmd = originalGetTopRcmd;
+        if (previous.NOT_GO_LOTTERY === undefined) delete process.env.NOT_GO_LOTTERY;
+        else process.env.NOT_GO_LOTTERY = previous.NOT_GO_LOTTERY;
+        for (const key of Object.keys(previous)) {
+            if (key !== 'NOT_GO_LOTTERY') config[key] = previous[key];
+        }
+    }
+});
+
+test('旧版视频分享兼容路径成功时保持原行为，限流时立即停止', { concurrency: false }, async () => {
+    const previous = {
+        create_dy_type: config.create_dy_type,
+        random_dynamic_wait: config.random_dynamic_wait
+    };
+    const originalGetTopRcmd = bili.getTopRcmd;
+    const originalShareVideoDetailed = bili.shareVideoDetailed;
+    config.create_dy_type = 1;
+    config.random_dynamic_wait = 0;
+    bili.getTopRcmd = async () => [[1, 711], [2, 712]];
+    try {
+        const successfulAttempts = [];
+        bili.shareVideoDetailed = async (_uid, aid) => {
+            successfulAttempts.push(aid);
+            return { status: 'success', reason: '分享成功' };
+        };
+        await randomDynamic(2);
+        assert.equal(successfulAttempts.length, 2);
+
+        const limitedAttempts = [];
+        bili.shareVideoDetailed = async (_uid, aid) => {
+            limitedAttempts.push(aid);
+            return {
+                status: 'failed',
+                providerCode: 4128002,
+                providerMessage: '操作太频繁了，请稍后重试',
+                reason: 'B站返回 4128002（操作太频繁了，请稍后重试）'
+            };
+        };
+        await randomDynamic(2);
+        assert.equal(limitedAttempts.length, 1);
+    } finally {
+        bili.getTopRcmd = originalGetTopRcmd;
+        bili.shareVideoDetailed = originalShareVideoDetailed;
+        config.create_dy_type = previous.create_dy_type;
+        config.random_dynamic_wait = previous.random_dynamic_wait;
     }
 });
