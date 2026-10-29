@@ -6,6 +6,9 @@ export const scheduleJobTypes = ['start', 'check', 'clear', 'account', 'comment_
 export type ScheduleJobType = typeof scheduleJobTypes[number];
 export type ScheduleTemplate = Record<ScheduleJobType, { cron: string; enabled: boolean }>;
 
+// 同一台服务器上的长运行直播任务不能在同一秒启动，否则 B 站很容易按出口 IP 触发验证码风控。
+export const liveAutomationStaggerMs = 90_000;
+
 export const builtInScheduleDefaults: ScheduleTemplate = {
   start: { cron: '0 */6 * * *', enabled: false },
   check: { cron: '*/30 * * * *', enabled: false },
@@ -109,10 +112,18 @@ export class AccountScheduleService {
     this.checking = true;
     try {
       const now = new Date();
+      let liveAutomationIndex = 0;
       for (const schedule of this.db.listDueSchedules(now.toISOString())) {
         const account = this.db.getAccount(schedule.account_id);
         const hasWork = schedule.type !== 'comment_backfill' || this.db.listCommentBackfillCandidates(schedule.account_id, 1).length > 0;
-        const job = account?.enabled && hasWork ? this.scheduler.enqueue(schedule.account_id, schedule.type, schedule.type === 'comment_backfill' ? { limit: 20 } : undefined) : null;
+        const shouldRun = Boolean(account?.enabled && hasWork);
+        let options: Record<string, unknown> | undefined;
+        if (shouldRun && schedule.type === 'comment_backfill') options = { limit: 20 };
+        if (shouldRun && schedule.type === 'live_automation') {
+          options = { startDelayMs: liveAutomationIndex * liveAutomationStaggerMs };
+          liveAutomationIndex += 1;
+        }
+        const job = shouldRun ? this.scheduler.enqueue(schedule.account_id, schedule.type, options) : null;
         this.db.markScheduleTriggered(schedule.id, job?.id || null, nextScheduleRun(schedule.cron, now));
       }
     } finally { this.checking = false; }

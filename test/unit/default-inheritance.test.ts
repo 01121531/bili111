@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AppDatabase } from '../../server/db';
-import { AccountScheduleService, builtInScheduleDefaults, nextScheduleRun, validateScheduleDefaults } from '../../server/account-schedules';
+import { AccountScheduleService, builtInScheduleDefaults, liveAutomationStaggerMs, nextScheduleRun, validateScheduleDefaults } from '../../server/account-schedules';
 import { diffFromBase, mergedConfig, publicConfigPayload, runtimeConfig, validateWebConfig } from '../../server/config';
 
 async function databaseFixture() {
@@ -108,6 +108,35 @@ test('新账号继承默认计划，默认变化不覆盖独立计划', async ()
     assert.equal(applied?.cron, '0 10 * * *');
     assert.equal(applied?.is_override, 0);
   } finally { service?.stop(); rmSync(item.directory, { recursive: true, force: true }); }
+});
+
+test('自动长运行直播任务按账号错峰启动', async () => {
+  const item = await databaseFixture();
+  let service: AccountScheduleService | undefined;
+  const calls: Array<{ accountId: number; type: string; options?: Record<string, unknown> }> = [];
+  try {
+    const accounts = [
+      item.db.createAccount({ uid: '2201', cookie: 'cookie-1' })!,
+      item.db.createAccount({ uid: '2202', cookie: 'cookie-2' })!,
+      item.db.createAccount({ uid: '2203', cookie: 'cookie-3' })!
+    ];
+    service = new AccountScheduleService(item.db, {
+      enqueue: (accountId: number, type: string, options?: Record<string, unknown>) => {
+        calls.push({ accountId, type, options });
+        return { id: calls.length };
+      }
+    } as any);
+    const due = new Date(Date.now() - 1000).toISOString();
+    for (const account of accounts) item.db.upsertSchedule(account.id, 'live_automation', '0 20 * * *', true, due);
+    await (service as any).tick();
+
+    const liveCalls = calls.filter(call => call.type === 'live_automation');
+    assert.equal(liveCalls.length, accounts.length);
+    assert.deepEqual(liveCalls.map(call => call.options?.startDelayMs), [0, liveAutomationStaggerMs, liveAutomationStaggerMs * 2]);
+  } finally {
+    service?.stop();
+    rmSync(item.directory, { recursive: true, force: true });
+  }
 });
 
 test('服务重启保留未变化继承任务的下次执行时间', async () => {

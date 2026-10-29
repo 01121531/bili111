@@ -70,6 +70,21 @@ export class DailyBiliClient {
     this.csrf = cookieValue(cookie, 'bili_jct');
   }
 
+  private async liveActionDelay(signal: AbortSignal) {
+    const delay = Math.max(0, Math.min(600000, Number(this.config.requestDelay) || 0));
+    if (!delay || signal.aborted || this.riskPauseReason) return;
+    await new Promise<void>(resolve => {
+      let timer: NodeJS.Timeout;
+      const finish = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', finish);
+        resolve();
+      };
+      timer = setTimeout(finish, delay);
+      signal.addEventListener('abort', finish, { once: true });
+    });
+  }
+
   private headers(origin = 'https://www.bilibili.com', referer = `${origin}/`) {
     return { accept: 'application/json, text/plain, */*', cookie: this.cookie, origin, referer, 'user-agent': UA };
   }
@@ -755,23 +770,31 @@ export class DailyBiliClient {
         if (cfg.intimacy && cycle === 0) {
           const like = await this.postForm<any>(`${LIVE}/xlive/web-ucenter/v1/interact/likeInteract`, { roomid: roomId, csrf: this.csrf, csrf_token: this.csrf }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
           await report('live_intimacy', roomId, like.ok ? { status: 'success', reason: '直播间点赞成功', providerCode: 0, attempts: like.result.attempts } : like.result);
+          if (this.riskPauseReason) break liveLoop;
+          await this.liveActionDelay(signal); if (signal.aborted) break liveLoop;
           const share = await this.postForm<any>(`${LIVE}/xlive/web-room/v1/index/TrigerInteract`, { roomid: roomId, interact_type: 3, csrf: this.csrf, csrf_token: this.csrf, visit_id: '' }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
           await report('live_intimacy', `${roomId}:share`, share.ok ? { status: 'success', reason: '直播间分享任务成功', providerCode: 0, attempts: share.result.attempts } : share.result);
+          if (this.riskPauseReason) break liveLoop;
+          await this.liveActionDelay(signal); if (signal.aborted) break liveLoop;
         }
         if (cfg.danmaku && danmakuCount < cfg.maxDanmaku && cycle === 0) {
           const message = cfg.messages[danmakuCount % Math.max(1, cfg.messages.length)] || '打卡';
           const dm = await this.postForm<any>(`${LIVE}/msg/send`, { bubble: 0, msg: message.slice(0, 20), color: 5566168, mode: 1, fontsize: 25, rnd: Math.floor(Date.now() / 1000), roomid: roomId, csrf: this.csrf, csrf_token: this.csrf }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
           await report('live_danmaku', roomId, dm.ok ? { status: 'success', reason: `直播弹幕已发送：${message.slice(0, 20)}`, providerCode: 0, attempts: dm.result.attempts } : dm.result); danmakuCount += 1;
+          if (this.riskPauseReason) break liveLoop;
+          await this.liveActionDelay(signal); if (signal.aborted) break liveLoop;
         }
         if (cfg.redPackets && redCount < cfg.maxRedPackets) {
           const packets = await this.get<any>(`${LIVE}/xlive/lottery-interface/v1/lottery/getLotteryInfoWeb?roomid=${encodeURIComponent(roomId)}`, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
-          if (!packets.ok) await report('live_red_packet', roomId, packets.result);
+          if (!packets.ok) { await report('live_red_packet', roomId, packets.result); if (this.riskPauseReason) break liveLoop; }
           else {
             const found: any[] = []; const walk = (value: any) => { if (!value || typeof value !== 'object') return; if ((value.lot_id || value.lottery_id) && (value.room_id || roomId)) found.push(value); for (const child of Object.values(value)) if (typeof child === 'object') walk(child); }; walk(packets.data);
             for (const packet of found) {
               if (redCount >= cfg.maxRedPackets) break;
               const lotId = String(packet.lot_id || packet.lottery_id); const join = await this.postJson<any>(`${LIVE}/xlive/lottery-interface/v1/popularityRedPocket/RedPocketDraw`, { room_id: Number(packet.room_id || roomId), ruid: Number(packet.ruid || upId), lot_id: Number(lotId), spm_id: '444.8.red_envelope.extract', jump_from: '26000', c_locale: 'zh_CN', device: 'android', mobi_app: 'android', platform: 'android', channel: 'xiaomi', version: '6.79.0', statistics: { appId: 1, platform: 3, version: '6.79.0', abtest: '' }, session_id: '', csrf_token: this.csrf, csrf: this.csrf, build: 6790300, visit_id: '' }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
               await report('live_red_packet', `${roomId}:${lotId}`, join.ok ? { status: 'success', reason: `直播红包 ${lotId} 已参与`, providerCode: 0, attempts: join.result.attempts } : join.result); if (join.ok) redCount += 1;
+              if (this.riskPauseReason) break liveLoop;
+              await this.liveActionDelay(signal); if (signal.aborted) break liveLoop;
             }
           }
         }
@@ -779,6 +802,8 @@ export class DailyBiliClient {
           const now = Math.floor(Date.now() / 1000); const base: Record<string, any> = { platform: 'android', uuid: randomBytes(16).toString('hex'), buvid: `XX${randomBytes(16).toString('hex').toUpperCase()}`, seq_id: cycle + 1, room_id: Number(roomId) || 0, parent_id: Number(info.data?.parent_area_id || 0), area_id: Number(info.data?.area_id || 0), timestamp: now - 60, secret_key: 'axoaadsffcazxksectbbb', watch_time: 60, up_id: Number(upId) || 0, up_level: 40, jump_from: '30000', gu_id: randomBytes(22).toString('hex').toUpperCase(), play_type: '0', play_url: '', s_time: '0', data_behavior_id: '', data_source_id: '', up_session: '', visit_id: randomBytes(16).toString('hex'), watch_status: '', click_id: '', session_id: '-99998', player_type: 0, client_ts: now };
           const heartbeat = await this.postJson<any>(`https://live-trace.bilibili.com/xlive/data-interface/v1/heartbeat/mobileHeartBeat`, { ...base, ts: now, client_sign: this.liveHeartbeatSign(base), mobi_app: 'android', channel: 'xiaomi_cn_tv.danmaku.bili_20210930', c_locale: 'zh_CN', device: 'android', build: 6790300, csrf_token: this.csrf, csrf: this.csrf, disable_rcmd: '0' }, 'https://live.bilibili.com', `https://live.bilibili.com/${roomId}`);
           await report('live_heartbeat', roomId, heartbeat.ok ? { status: 'success', reason: `第 ${cycle + 1} 次直播心跳成功`, providerCode: 0, attempts: heartbeat.result.attempts } : heartbeat.result);
+          if (this.riskPauseReason) break liveLoop;
+          await this.liveActionDelay(signal); if (signal.aborted) break liveLoop;
         }
       }
       cycle += 1; if (signal.aborted || Date.now() >= deadline || Date.now() >= hardStop) break;

@@ -98,6 +98,19 @@ export class LongTaskManager {
     const session = this.db.getLongTaskSession(sessionId); if (!session) return;
     if (session.cancel_requested || session.status === 'cancelled') { this.db.updateJob(session.job_id, 'cancelled', { finishedAt: new Date().toISOString(), error: '任务在启动前已取消' }); return; }
     const account = this.db.getAccount(Number(session.account_id)); if (!account || !account.enabled) { this.db.updateLongTaskSession(sessionId, 'skipped', { finishedAt: new Date().toISOString(), error: '账号已停用或不存在' }); this.db.updateJob(session.job_id, 'skipped', { finishedAt: new Date().toISOString(), error: '账号已停用或不存在' }); return; }
+    const startDelayMs = Math.max(0, Math.min(3_600_000, Number(session.details?.startDelayMs) || 0));
+    const startAt = Date.now() + startDelayMs;
+    while (Date.now() < startAt) {
+      const latest = this.db.getLongTaskSession(sessionId);
+      if (latest?.cancel_requested || this.shuttingDown) {
+        const reason = this.shuttingDown ? '服务停止前任务尚未启动' : '任务在启动前已取消';
+        this.db.updateLongTaskSession(sessionId, 'cancelled', { finishedAt: new Date().toISOString(), error: reason, cancelRequested: true });
+        this.db.updateJob(session.job_id, 'cancelled', { finishedAt: new Date().toISOString(), error: reason });
+        this.publish({ type: 'long-task', payload: this.db.getLongTaskSession(sessionId) });
+        return;
+      }
+      await wait(Math.min(250, Math.max(1, startAt - Date.now())));
+    }
     while (this.normalBusy(account.id)) {
       const latest = this.db.getLongTaskSession(sessionId);
       if (latest?.cancel_requested || this.shuttingDown) {

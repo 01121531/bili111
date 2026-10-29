@@ -138,6 +138,24 @@ test('等待同账号普通任务的长任务可在启动前取消并结束作�
   } finally { await db?.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test('长任务在自动错峰等待期间可取消', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'lottery-long-stagger-cancel-'));
+  let db: AppDatabase | undefined;
+  try {
+    db = await AppDatabase.create(join(directory, 'test.db'));
+    const account = db.createAccount({ uid: '9015', cookie: encrypt('DedeUserID=9015; bili_jct=test') })!;
+    const manager = new LongTaskManager(db, () => undefined, () => false, () => undefined);
+    const queued = manager.enqueue(account.id, 'live_automation', { startDelayMs: 5000 });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    assert.equal(db.getLongTaskSession(Number(queued.session.id))?.status, 'pending');
+    assert.equal(manager.cancel(Number(queued.session.id)), true);
+    await new Promise(resolve => setTimeout(resolve, 350));
+    assert.equal(db.getLongTaskSession(Number(queued.session.id))?.status, 'cancelled');
+    assert.equal(db.getJob(Number(queued.job.id))?.status, 'cancelled');
+    await manager.shutdown();
+  } finally { await db?.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test('每日任务预览只读取本地状态，不生成写操作记录', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'lottery-daily-'));
   let db: AppDatabase | undefined;
@@ -357,6 +375,48 @@ test('直播心跳使用 B 站要求的数字房间字段', { concurrency: false
     assert.equal(typeof heartbeatBody.session_id, 'string');
     assert.equal(typeof heartbeatBody.player_type, 'number');
     assert.equal(heartbeatBody.player_type, 0);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('长运行直播写动作遵守请求间隔', { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; at: number }> = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input); calls.push({ url, at: Date.now() });
+    if (url.includes('/room/v1/Room/get_info')) return jsonResponse({ code: 0, data: { uid: 9001, parent_area_id: 1, area_id: 2 } });
+    if (url.includes('/likeInteract') || url.includes('/TrigerInteract') || url.includes('/msg/send') || url.includes('/mobileHeartBeat')) return jsonResponse({ code: 0, data: {} });
+    return jsonResponse({ code: 0, data: { isLogin: true, mid: 42 } });
+  }) as typeof fetch;
+  try {
+    const config = structuredClone(defaultDailyConfig);
+    config.liveAutomation = { ...config.liveAutomation, enabled: true, rooms: ['2001'], intimacy: true, danmaku: true, heartbeat: true, redPackets: false, durationMinutes: 1 };
+    config.requestDelay = 60; config.retryTimes = 0;
+    const client = new DailyBiliClient('DedeUserID=42; bili_jct=csrf-value', config);
+    const controller = new AbortController();
+    await client.runLiveAutomation(controller.signal, async (action) => { if (action === 'live_heartbeat') controller.abort(); });
+    const writes = calls.filter(call => /likeInteract|TrigerInteract|msg\/send|mobileHeartBeat/.test(call.url));
+    assert.equal(writes.length, 4);
+    for (let index = 1; index < writes.length; index += 1) assert.ok(writes[index].at - writes[index - 1].at >= 45);
+  } finally { globalThis.fetch = originalFetch; }
+});
+
+test('长运行直播遇到验证码风控后停止后续写操作', { concurrency: false }, async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input); calls.push(url);
+    if (url.includes('/room/v1/Room/get_info')) return jsonResponse({ code: 0, data: { uid: 9001, parent_area_id: 1, area_id: 2 } });
+    if (url.includes('/likeInteract')) return jsonResponse({ code: -352, message: '需要进行验证码校验' });
+    return jsonResponse({ code: 0, data: {} });
+  }) as typeof fetch;
+  try {
+    const config = structuredClone(defaultDailyConfig);
+    config.liveAutomation = { ...config.liveAutomation, enabled: true, rooms: ['2001'], intimacy: true, danmaku: true, heartbeat: true, redPackets: false, durationMinutes: 1 };
+    config.requestDelay = 0; config.retryTimes = 0;
+    const client = new DailyBiliClient('DedeUserID=42; bili_jct=csrf-value', config);
+    const result = await client.runLiveAutomation(new AbortController().signal, async () => undefined);
+    assert.equal(result.status, 'throttled');
+    assert.equal(calls.filter(url => /likeInteract|TrigerInteract|msg\/send|mobileHeartBeat/.test(url)).length, 1);
   } finally { globalThis.fetch = originalFetch; }
 });
 
