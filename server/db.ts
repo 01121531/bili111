@@ -13,6 +13,7 @@ export type LotteryInput = { dyid: string; source?: string; author?: string; aut
 export type ParticipationAttemptInput = { action?: string; status?: string; internalCode?: number; providerCode?: number | null; providerMessage?: string | null; errorType?: string | null; httpStatus?: number | null; transportCode?: string | null; retryable?: boolean; attemptNo?: number; targetId?: string | null; occurredAt?: string };
 export type ParticipationAction = { plannedText?: string | null; actualText?: string | null; source?: string; status?: string; code?: number; reason?: string; attempts?: ParticipationAttemptInput[] };
 export type ParticipationInput = { dyid: string; overallStatus: string; resultCode?: number; resultReason?: string; comment?: ParticipationAction; follow?: ParticipationAction; like?: ParticipationAction; relay?: ParticipationAction; startedAt?: string; finishedAt?: string };
+export type VideoShareInput = { uid?: string | null; aid: string; content?: string | null; source?: string | null; status: string; reason?: string | null; providerCode?: number | null; providerMessage?: string | null; errorType?: string | null; httpStatus?: number | null; transportCode?: string | null; occurredAt?: string | null };
 export type LotteryQuery = { page?: number; pageSize?: number; accountId?: number; source?: string; discoveryStatus?: string; participationStatus?: string; drawTimeSource?: string; filterSource?: string; search?: string; from?: string; to?: string };
 export type ParticipationQuery = { page?: number; pageSize?: number; status?: string; search?: string };
 export type LogQuery = { cursor?: number; limit?: number; level?: string; search?: string; errorsOnly?: boolean };
@@ -150,6 +151,7 @@ export class AppDatabase {
       CREATE TABLE IF NOT EXISTS daily_risk_consents (id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, account_id INTEGER NOT NULL DEFAULT 0, action TEXT NOT NULL, accepted_at TEXT NOT NULL, UNIQUE(scope,account_id,action));
       CREATE TABLE IF NOT EXISTS long_task_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, run_id INTEGER, account_id INTEGER NOT NULL, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', cancel_requested INTEGER NOT NULL DEFAULT 0, started_at TEXT, heartbeat_at TEXT, finished_at TEXT, error TEXT, details_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS daily_media_assets (id INTEGER PRIMARY KEY AUTOINCREMENT, original_name TEXT NOT NULL, stored_name TEXT NOT NULL UNIQUE, mime_type TEXT, size_bytes INTEGER NOT NULL, duration_seconds REAL, probe_status TEXT NOT NULL DEFAULT 'pending', probe_error TEXT, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS video_share_records (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id INTEGER NOT NULL, account_id INTEGER NOT NULL, uid TEXT, aid TEXT NOT NULL, content TEXT, source TEXT, status TEXT NOT NULL, reason TEXT, provider_code INTEGER, provider_message TEXT, error_type TEXT, http_status INTEGER, transport_code TEXT, occurred_at TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(run_id,aid));
       CREATE TABLE IF NOT EXISTS system_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
     this.addColumn('win_events', 'actor TEXT');
     this.addColumn('win_events', 'occurred_at TEXT');
@@ -202,6 +204,7 @@ export class AppDatabase {
     this.db.run('CREATE INDEX IF NOT EXISTS idx_daily_action_run ON daily_action_records(run_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_daily_action_date ON daily_action_records(account_id,task_date,status)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_daily_attempt_run ON daily_action_attempts(run_id,action,id)');
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_video_share_run ON video_share_records(run_id,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_long_task_account ON long_task_sessions(account_id,status,id)');
     this.db.run('CREATE INDEX IF NOT EXISTS idx_lotteries_cleanup_protection ON lotteries(account_id,source_created_at,participation_status)');
     this.db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_win_events_event_key ON win_events(event_key) WHERE event_key IS NOT NULL');
@@ -641,6 +644,19 @@ export class AppDatabase {
       try { summary[key] = JSON.parse(summary[key] || '[]'); } catch { summary[key] = []; }
     }
     return { summary, records: this.rows<any>('SELECT * FROM cleanup_records WHERE run_id=? ORDER BY id', [runId]) };
+  }
+  upsertVideoShare(runId: number, accountId: number, input: VideoShareInput) {
+    const now = this.now();
+    this.run(`INSERT INTO video_share_records(run_id,account_id,uid,aid,content,source,status,reason,provider_code,provider_message,error_type,http_status,transport_code,occurred_at,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(run_id,aid) DO UPDATE SET uid=excluded.uid,content=excluded.content,source=excluded.source,status=excluded.status,reason=excluded.reason,provider_code=excluded.provider_code,provider_message=excluded.provider_message,error_type=excluded.error_type,http_status=excluded.http_status,transport_code=excluded.transport_code,occurred_at=excluded.occurred_at`,
+      [runId, accountId, input.uid || null, input.aid, input.content || null, input.source || null, input.status, input.reason || null, input.providerCode ?? null, input.providerMessage || null, input.errorType || null, input.httpStatus ?? null, input.transportCode || null, input.occurredAt || now, now]);
+    return this.row<any>('SELECT * FROM video_share_records WHERE run_id=? AND aid=?', [runId, input.aid]);
+  }
+  listRunVideoShares(runId: number) {
+    const items = this.rows<any>('SELECT * FROM video_share_records WHERE run_id=? ORDER BY id', [runId]);
+    const count = (status?: string) => items.filter(item => !status || item.status === status).length;
+    return { items, summary: { total: items.length, success: count('success'), failed: count('failed'), skipped: count('skipped') } };
   }
   lotteryBackfillStats() { const total = Number(this.row<any>('SELECT COUNT(*) count FROM lotteries')?.count || 0); const pending = Number(this.row<any>("SELECT COUNT(*) count FROM lotteries WHERE enrichment_status!='failed' AND (description IS NULL OR description='' OR enrichment_status='pending')")?.count || 0); const failed = Number(this.row<any>("SELECT COUNT(*) count FROM lotteries WHERE enrichment_status='failed'")?.count || 0); return { total, pending, failed, complete: Math.max(0, total - pending - failed) }; }
   listWins(limit = 100) { return this.rows('SELECT w.*,a.name account_name FROM win_events w JOIN accounts a ON a.id=w.account_id ORDER BY w.id DESC LIMIT ?', [limit]); }

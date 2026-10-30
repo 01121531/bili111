@@ -264,6 +264,11 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
 .participation-action details { padding-top: 6px; border-top: 1px solid var(--border); }
 .participation-action summary { color: var(--primary); cursor: pointer; font-size: .8rem; }
 .participation-action details p { margin-top: 7px; color: var(--text-muted); font-size: .84rem; }
+.content-source-badge { max-width: 100%; min-height: 22px; padding: 2px 7px; display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 11px; background: var(--surface-subtle); color: var(--text-muted); font-size: .7rem; font-weight: 700; line-height: 1.35; white-space: normal; word-break: break-word; }
+.source-ai { border-color: color-mix(in srgb, var(--primary) 30%, var(--border)); background: var(--primary-soft); color: var(--primary); }
+.source-fallback, .source-safety_fallback { border-color: color-mix(in srgb, var(--warning) 30%, var(--border)); background: var(--warning-soft); color: var(--warning); }
+.source-configured, .source-copied { border-color: color-mix(in srgb, var(--success) 28%, var(--border)); background: var(--success-soft); color: var(--success); }
+.source-empty, .source-none, .source-unknown { color: var(--text-subtle); }
 .action-error-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .action-error-meta span { padding: 3px 6px; border: 1px solid color-mix(in srgb, var(--danger) 26%, var(--border)); border-radius: 4px; background: var(--surface); color: var(--danger); font: 700 .74rem "SFMono-Regular", Consolas, monospace; }
 .action-error-meta strong { width: 100%; color: var(--danger); font-size: .82rem; font-weight: 600; word-break: break-word; }
@@ -282,6 +287,14 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
 .attempt-loading { padding: 10px 0 2px; color: var(--text-muted); font-size: .82rem; }
 .participation-card footer { justify-content: flex-start; }
 .participation-card footer strong { margin-left: auto; color: var(--text); font-weight: 500; }
+.video-share-list { display: grid; }
+.video-share-card { min-width: 0; padding: 16px 18px; display: grid; gap: 9px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.video-share-card:last-child { border-bottom: 0; }
+.video-share-card header { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.video-share-card header > div { min-width: 0; display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; }
+.video-share-card header span, .video-share-card > small { color: var(--text-muted); font-size: .8rem; }
+.video-share-content { min-width: 0; padding: 10px 12px; display: grid; justify-items: start; gap: 7px; border-left: 3px solid var(--border-strong); background: var(--surface-subtle); }
+.video-share-content p { min-width: 0; white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .log-toolbar { padding: 10px 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
 .log-toolbar select { width: 120px; }
 .compact-search { min-width: 180px; }
@@ -595,6 +608,9 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
   .participation-actions { grid-template-columns: 1fr; }
   .participation-card header, .participation-card footer { display: grid; }
   .participation-card footer strong { margin-left: 0; }
+  .video-share-card { padding: 14px; }
+  .video-share-card header { display: grid; }
+  .video-share-card header > div { display: grid; justify-items: start; }
   .log-toolbar > * { flex: 1 1 130px; }
   .log-toolbar .icon-button { flex: 0 0 44px; }
   .log-entry { grid-template-columns: 76px 52px 1fr; }
@@ -661,6 +677,9 @@ tbody tr:hover { background: color-mix(in srgb, var(--surface-hover) 60%, transp
   .config-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .schedule-card-heading { display: grid; }
   .schedule-actions .button { width: 100%; }
+  .participation-action-title { align-items: flex-start; flex-direction: column; }
+  .participation-action-title > span { align-items: flex-start; flex-wrap: wrap; }
+  .video-share-content { padding: 9px 10px; }
   .responsive-table td { padding-left: 0; padding-top: 26px; }
   .responsive-table td::before { width: 100%; top: 3px; }
 }

@@ -115,7 +115,7 @@ export class EngineRunner {
       const message = raw.trim(); if (!message) return;
       if (message.startsWith('[LOTTERY_WEB_EVENT]')) {
         try {
-          const event = JSON.parse(message.slice('[LOTTERY_WEB_EVENT]'.length)) as { type: string; lottery?: Record<string, unknown>; participation?: Record<string, any>; cleanup?: Record<string, any>; [key: string]: unknown };
+          const event = JSON.parse(message.slice('[LOTTERY_WEB_EVENT]'.length)) as { type: string; lottery?: Record<string, unknown>; participation?: Record<string, any>; cleanup?: Record<string, any>; videoShare?: Record<string, any>; [key: string]: unknown };
           if (event.type === 'lottery' && event.lottery?.dyid) {
             const dyid = String(event.lottery.dyid);
             const description = String(event.lottery.description || ''); const sourceCreatedAt = Number(event.lottery.sourceCreatedAt || 0) || null;
@@ -166,6 +166,31 @@ export class EngineRunner {
             if (overallStatus === 'partial' && !participatedIds.has(dyid)) { partialIds.add(dyid); failedIds.delete(dyid); }
             if (overallStatus === 'failed' && !participatedIds.has(dyid) && !partialIds.has(dyid)) failedIds.add(dyid);
             this.emit({ type: 'participation', payload: record });
+          } else if (event.type === 'video_share' && event.videoShare?.aid) {
+            const videoShare = event.videoShare as Record<string, any>;
+            const finiteNumber = (value: unknown) => {
+              if (value === null || value === undefined || value === '') return null;
+              const number = Number(value);
+              return Number.isFinite(number) ? number : null;
+            };
+            const status = ['success', 'failed', 'skipped'].includes(String(videoShare.status))
+              ? String(videoShare.status)
+              : 'failed';
+            const record = this.db.upsertVideoShare(runId, account.id, {
+              uid: cleanRuntimeText(videoShare.uid, 40),
+              aid: String(videoShare.aid).slice(0, 80),
+              content: cleanRuntimeText(videoShare.content, 233),
+              source: cleanRuntimeText(videoShare.source, 40),
+              status,
+              reason: cleanRuntimeText(videoShare.reason, 500),
+              providerCode: finiteNumber(videoShare.providerCode),
+              providerMessage: cleanRuntimeText(videoShare.providerMessage, 500),
+              errorType: cleanRuntimeText(videoShare.errorType, 40),
+              httpStatus: finiteNumber(videoShare.httpStatus),
+              transportCode: cleanRuntimeText(videoShare.transportCode, 80),
+              occurredAt: cleanRuntimeText(videoShare.occurredAt, 50)
+            });
+            this.emit({ type: 'video_share', payload: record });
           } else if (event.type === 'cleanup_record' && event.cleanup?.targetId) {
             const record = this.db.addCleanupRecord(runId, account.id, {
               action: String(event.cleanup.action || 'skip').slice(0, 40), targetId: String(event.cleanup.targetId).slice(0, 80),

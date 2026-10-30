@@ -95,9 +95,9 @@ export const configFields: ConfigField[] = [
   number('create_dy_num', 'random', '结束时发送数量', '任务结束时发送的随机动态数量。', 0, 100, '条'),
   { key: 'dy_contents', category: 'random', label: '随机动态内容', description: '普通文本或图片对象数组；可在高级 JSON 中精确调整。', type: 'json' },
   { key: 'create_dy_mode', category: 'random', label: '随机动态插入规则', description: '二维数组，分别表示触发条数和发送条数。', type: 'json' },
-  number('share_video_every_forwards', 'random', '每成功转发多少条触发分享', '只统计转发状态为成功的抽奖动态；0 表示关闭。', 0, 100, '条'),
-  number('share_video_count_per_trigger', 'random', '每次触发分享视频数', '达到上方成功转发数量时立即分享的推荐视频数；0 表示不分享。', 0, 20, '个'),
-  number('share_video_after_run', 'random', '任务结束分享视频数', '全部抽奖处理正常结束后分享的推荐视频数；0 表示关闭。', 0, 20, '个'),
+  number('share_video_every_forwards', 'random', '每成功转发多少条触发分享', '只统计转发状态为成功的抽奖动态；0 表示关闭。推荐视频附言优先使用账号的 AI 转发配置。', 0, 100, '条'),
+  number('share_video_count_per_trigger', 'random', '每次触发分享视频数', '达到上方成功转发数量时立即分享的推荐视频数；0 表示不分享。附言会经过敏感词和 233 字安全校验。', 0, 20, '个'),
+  number('share_video_after_run', 'random', '任务结束分享视频数', '全部抽奖处理正常结束后分享的推荐视频数；0 表示关闭。AI 不可用时会使用备用或固定转发文案。', 0, 20, '个'),
 
   list('notice_key_words', 'winning', '中奖通知关键词', '满足任一规则时生成疑似中奖记录；~ 开头表示排除规则。'),
   toggle('notice_running_state', 'winning', '发送运行状态通知', '保留原 CLI 的运行状态通知。'),

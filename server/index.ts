@@ -291,6 +291,11 @@ app.get('/api/runs/:id/participations', { preHandler: auth }, async (request) =>
 app.get('/api/runs/:id/cleanup', { preHandler: auth }, async (request, reply) => {
   const id = parseId((request.params as any).id); if (!db.getRun(id)) return reply.code(404).send({ error: '运行记录不存在' }); return db.getRunCleanup(id);
 });
+app.get('/api/runs/:id/video-shares', { preHandler: auth }, async (request, reply) => {
+  const id = parseId((request.params as any).id);
+  if (!db.getRun(id)) return reply.code(404).send({ error: '运行记录不存在' });
+  return db.listRunVideoShares(id);
+});
 app.get('/api/runs/:id/logs', { preHandler: auth }, async (request) => {
   const query = (request.query || {}) as any;
   return db.listLogs(parseId((request.params as any).id), { cursor: Number(query.cursor) || undefined, limit: Number(query.limit) || 200, level: query.level || undefined, search: query.search || undefined, errorsOnly: query.errorsOnly === '1' || query.errorsOnly === 'true' });

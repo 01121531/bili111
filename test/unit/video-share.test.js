@@ -17,6 +17,8 @@ function controller(options = {}) {
         },
         getRecommendations: options.getRecommendations,
         shareVideo: options.shareVideo,
+        buildRelayText: options.buildRelayText,
+        emitRuntimeEvent: options.emitRuntimeEvent,
         maxRecommendationCalls: options.maxRecommendationCalls,
         shareInterval: options.shareInterval ?? 0
     });
@@ -181,6 +183,49 @@ test('旧布尔分享接口保持兼容：false 表示成功，true 表示失败
         shareVideo: async () => true
     });
     assert.deepEqual(await failed.recordSuccessfulForward(), { triggered: true, shared: 0, successfulForwards: 1 });
+});
+
+test('推荐视频使用生成的附言，并记录来源、状态和真实错误字段', async () => {
+    const calls = [];
+    const events = [];
+    const item = controller({
+        config: { share_video_every_forwards: 1, share_video_count_per_trigger: 1 },
+        getRecommendations: async () => [[101, 901]],
+        buildRelayText: async () => ({ text: 'AI 生成的视频附言', source: 'ai' }),
+        shareVideo: async (uid, aid, content) => {
+            calls.push({ uid, aid, content });
+            return {
+                status: 'failed',
+                reason: '转发失败：B站返回 4126021（等级不足无法发送）',
+                providerCode: 4126021,
+                providerMessage: '等级不足无法发送',
+                errorType: 'bili_api',
+                httpStatus: 200,
+                transportCode: null,
+                occurredAt: '2026-10-30T00:00:00.000Z'
+            };
+        },
+        emitRuntimeEvent: (type, payload) => events.push({ type, payload })
+    });
+
+    assert.deepEqual(await item.recordSuccessfulForward(), { triggered: true, shared: 0, successfulForwards: 1 });
+    assert.deepEqual(calls, [{ uid: 101, aid: 901, content: 'AI 生成的视频附言' }]);
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, 'video_share');
+    assert.deepEqual(events[0].payload.videoShare, {
+        uid: '101',
+        aid: '901',
+        content: 'AI 生成的视频附言',
+        source: 'ai',
+        status: 'failed',
+        reason: '转发失败：B站返回 4126021（等级不足无法发送）',
+        providerCode: 4126021,
+        providerMessage: '等级不足无法发送',
+        errorType: 'bili_api',
+        httpStatus: 200,
+        transportCode: null,
+        occurredAt: '2026-10-30T00:00:00.000Z'
+    });
 });
 
 test('discover 不创建视频分享控制器且不执行任何参与写操作', async () => {
